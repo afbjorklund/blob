@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -19,7 +20,7 @@ func NewDirStorage(rootDir string) (*DirStorage, error) {
 }
 
 func (s *DirStorage) Put(digest []byte, r io.Reader) error {
-	hexDigest := string(digest)
+	hexDigest := fmt.Sprintf("%x", digest)
 	prefix := hexDigest[:2]
 
 	dir := filepath.Join(s.rootDir, prefix)
@@ -49,7 +50,7 @@ func (s *DirStorage) Put(digest []byte, r io.Reader) error {
 }
 
 func (s *DirStorage) Get(digest []byte) (io.ReadCloser, error) {
-	hexDigest := string(digest)
+	hexDigest := fmt.Sprintf("%x", digest)
 	prefix := hexDigest[:2]
 
 	dir := filepath.Join(s.rootDir, prefix)
@@ -59,7 +60,7 @@ func (s *DirStorage) Get(digest []byte) (io.ReadCloser, error) {
 }
 
 func (s *DirStorage) Has(digest []byte) (bool, error) {
-	hexDigest := string(digest)
+	hexDigest := fmt.Sprintf("%x", digest)
 	prefix := hexDigest[:2]
 
 	dir := filepath.Join(s.rootDir, prefix)
