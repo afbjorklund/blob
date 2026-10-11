@@ -6,7 +6,7 @@ A content-addressable blob store using CID (Content ID) addressing with pluggabl
 
 - **CIDv1 with base32hex encoding** - IPFS-compatible content addressing
 - **Pluggable storage backends**:
-  - Directory (2-char prefix with full hash filename)
+  - Directory (2-char prefix of the full hash filename)
   - SQLite (single database file)
 - **Streaming I/O** - Handles large files without loading into memory
 
@@ -50,7 +50,7 @@ $ cat output.txt
 test
 ```
 
-Files are stored in `.blob-store/<prefix>/<digest>`.
+Files are stored in `.blob-store/<prefix of hash>/<rest of hash>`.
 
 ### SQLite backend
 

@@ -85,8 +85,7 @@ func computeHash(filePath string) ([]byte, error) {
 		return nil, err
 	}
 
-	digest := hash.Sum(nil)
-	return digest, nil
+	return hash.Sum(nil), nil
 }
 
 func isJSONFile(filePath string) (bool, error) {
@@ -105,8 +104,8 @@ func isJSONFile(filePath string) (bool, error) {
 	return isJSON(buf), nil
 }
 
-func computeCID(digest []byte, isJSON bool) (string, error) {
-	mh, err := multihash.Encode(digest, multihash.SHA2_256)
+func computeCID(hash []byte, isJSON bool) (string, error) {
+	mh, err := multihash.Encode(hash, multihash.SHA2_256)
 	if err != nil {
 		return "", err
 	}
@@ -131,11 +130,11 @@ func runHash(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	digest, err := computeHash(args[0])
+	hash, err := computeHash(args[0])
 	if err != nil {
 		return err
 	}
-	cidBase32hex, err := computeCID(digest, isJSON)
+	cidBase32hex, err := computeCID(hash, isJSON)
 	if err != nil {
 		return err
 	}
@@ -161,12 +160,12 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	digest, err := computeHash(filePath)
+	hash, err := computeHash(filePath)
 	if err != nil {
 		return err
 	}
 
-	cidBase32hex, err := computeCID(digest, isJSON)
+	cidBase32hex, err := computeCID(hash, isJSON)
 	if err != nil {
 		return err
 	}
@@ -176,7 +175,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	has, err := storageBackend.Has(digest)
+	has, err := storageBackend.Has(hash)
 	if err != nil {
 		return err
 	}
@@ -191,7 +190,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := storageBackend.Put(digest, stat.Size(), file); err != nil {
+	if err := storageBackend.Put(hash, stat.Size(), file); err != nil {
 		return err
 	}
 
@@ -210,14 +209,14 @@ func runGet(cmd *cobra.Command, args []string) error {
 	}
 
 	mh := c.Hash()
-	digest := mh[2:]
+	hash := mh[2:]
 
 	storageBackend, err := getStorageBackend()
 	if err != nil {
 		return err
 	}
 
-	reader, _, err := storageBackend.Get(digest)
+	reader, _, err := storageBackend.Get(hash)
 	if err != nil {
 		return err
 	}

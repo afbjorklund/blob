@@ -26,7 +26,7 @@ func NewSQLStorage(dbPath string) (*SQLStorage, error) {
 		return nil, err
 	}
 
-	createTable := "CREATE TABLE IF NOT EXISTS blobs (digest TEXT PRIMARY KEY, data BLOB NOT NULL)"
+	createTable := "CREATE TABLE IF NOT EXISTS blobs (hash TEXT PRIMARY KEY, data BLOB NOT NULL)"
 
 	var errValue error
 	endFn := sqlitex.Transaction(db)
@@ -54,18 +54,18 @@ func NewSQLStorage(dbPath string) (*SQLStorage, error) {
 	return &SQLStorage{dbPath: dbPath, db: db}, nil
 }
 
-func (s *SQLStorage) Put(digest []byte, size int64, r io.Reader) error {
+func (s *SQLStorage) Put(hash []byte, size int64, r io.Reader) error {
 	var errValue error
 	endFn := sqlitex.Transaction(s.db)
 	defer endFn(&errValue)
 
-	stmt, err := s.db.Prepare("INSERT INTO blobs (digest, data) VALUES (?, zeroblob(?))")
+	stmt, err := s.db.Prepare("INSERT INTO blobs (hash, data) VALUES (?, zeroblob(?))")
 	if err != nil {
 		return err
 	}
 	defer stmt.Finalize()
 
-	stmt.BindBytes(1, digest)
+	stmt.BindBytes(1, hash)
 	stmt.BindInt64(2, size)
 
 	if _, err := stmt.Step(); err != nil {
@@ -99,14 +99,14 @@ func (s *SQLStorage) Put(digest []byte, size int64, r io.Reader) error {
 	return nil
 }
 
-func (s *SQLStorage) Get(digest []byte) (io.ReadCloser, int64, error) {
+func (s *SQLStorage) Get(hash []byte) (io.ReadCloser, int64, error) {
 	var data []byte
 	size := int64(0)
 	err := sqlitex.ExecuteTransient(
 		s.db,
-		"SELECT data FROM blobs WHERE digest = ?",
+		"SELECT data FROM blobs WHERE hash = ?",
 		&sqlitex.ExecOptions{
-			Args: []any{digest},
+			Args: []any{hash},
 			ResultFunc: func(stmt *sqlite.Stmt) error {
 				size = int64(stmt.ColumnLen(0))
 				data = make([]byte, size)
@@ -125,13 +125,13 @@ func (s *SQLStorage) Get(digest []byte) (io.ReadCloser, int64, error) {
 	return io.NopCloser(bytes.NewReader(data)), size, nil
 }
 
-func (s *SQLStorage) Has(digest []byte) (bool, error) {
+func (s *SQLStorage) Has(hash []byte) (bool, error) {
 	var count int
 	err := sqlitex.ExecuteTransient(
 		s.db,
-		"SELECT COUNT(*) FROM blobs WHERE digest = ?",
+		"SELECT COUNT(*) FROM blobs WHERE hash = ?",
 		&sqlitex.ExecOptions{
-			Args: []any{digest},
+			Args: []any{hash},
 			ResultFunc: func(stmt *sqlite.Stmt) error {
 				count = stmt.ColumnInt(0)
 				return nil

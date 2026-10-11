@@ -13,9 +13,9 @@ const (
 )
 
 type StorageBackend interface {
-	Put(digest []byte, size int64, r io.Reader) error
-	Get(digest []byte) (io.ReadCloser, int64, error)
-	Has(digest []byte) (bool, error)
+	Put(hash []byte, size int64, r io.Reader) error
+	Get(hash []byte) (io.ReadCloser, int64, error)
+	Has(hash []byte) (bool, error)
 }
 
 func NewStorage(backend StorageType, path string) (StorageBackend, error) {

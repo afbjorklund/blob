@@ -19,16 +19,16 @@ func NewDirStorage(rootDir string) (*DirStorage, error) {
 	return &DirStorage{rootDir: rootDir}, nil
 }
 
-func (s *DirStorage) Put(digest []byte, size int64, r io.Reader) error {
-	hexDigest := fmt.Sprintf("%x", digest)
-	prefix := hexDigest[:2]
+func (s *DirStorage) Put(hash []byte, size int64, r io.Reader) error {
+	hexHash := fmt.Sprintf("%x", hash)
+	prefix := hexHash[:2]
 
 	dir := filepath.Join(s.rootDir, prefix)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
-	rest := hexDigest[2:]
+	rest := hexHash[2:]
 	filename := rest
 
 	path := filepath.Join(dir, filename)
@@ -52,10 +52,10 @@ func (s *DirStorage) Put(digest []byte, size int64, r io.Reader) error {
 	return os.Rename(tmpPath, path)
 }
 
-func (s *DirStorage) Get(digest []byte) (io.ReadCloser, int64, error) {
-	hexDigest := fmt.Sprintf("%x", digest)
-	prefix := hexDigest[:2]
-	rest := hexDigest[2:]
+func (s *DirStorage) Get(hash []byte) (io.ReadCloser, int64, error) {
+	hexHash := fmt.Sprintf("%x", hash)
+	prefix := hexHash[:2]
+	rest := hexHash[2:]
 
 	filename := rest
 	path := filepath.Join(s.rootDir, prefix, filename)
@@ -74,10 +74,10 @@ func (s *DirStorage) Get(digest []byte) (io.ReadCloser, int64, error) {
 	return f, stat.Size(), nil
 }
 
-func (s *DirStorage) Has(digest []byte) (bool, error) {
-	hexDigest := fmt.Sprintf("%x", digest)
-	prefix := hexDigest[:2]
-	rest := hexDigest[2:]
+func (s *DirStorage) Has(hash []byte) (bool, error) {
+	hexHash := fmt.Sprintf("%x", hash)
+	prefix := hexHash[:2]
+	rest := hexHash[2:]
 
 	filename := rest
 	path := filepath.Join(s.rootDir, prefix, filename)
