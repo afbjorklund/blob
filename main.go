@@ -19,6 +19,7 @@ var (
 	storageType string
 	storagePath string
 	outputPath  string
+	hashOnly    bool
 )
 
 func main() {
@@ -31,21 +32,14 @@ func main() {
 	rootCmd.PersistentFlags().StringVarP(&storageType, "storage", "s", "dir", "storage backend (dir or sql)")
 	rootCmd.PersistentFlags().StringVarP(&storagePath, "path", "p", "./.blob-store", "storage path")
 
-	hashCmd := &cobra.Command{
-		Use:   "hash [file]",
-		Short: "Compute and print the CID hash of a file",
-		Args:  cobra.ExactArgs(1),
-		RunE:  runHash,
-	}
-
-	rootCmd.AddCommand(hashCmd)
-
 	addCmd := &cobra.Command{
 		Use:   "add <file>",
 		Short: "Add a file to the blob store",
 		Args:  cobra.ExactArgs(1),
 		RunE:  runAdd,
 	}
+
+	addCmd.Flags().BoolVarP(&hashOnly, "only-hash", "n", false, "only compute and print the hash, do not store")
 
 	rootCmd.AddCommand(addCmd)
 
@@ -125,23 +119,6 @@ func computeCID(hash []byte, isJSON bool) (string, error) {
 	return s, nil
 }
 
-func runHash(cmd *cobra.Command, args []string) error {
-	isJSON, err := isJSONFile(args[0])
-	if err != nil {
-		return err
-	}
-	hash, err := computeHash(args[0])
-	if err != nil {
-		return err
-	}
-	cidBase32hex, err := computeCID(hash, isJSON)
-	if err != nil {
-		return err
-	}
-	fmt.Println(cidBase32hex)
-	return nil
-}
-
 func runAdd(cmd *cobra.Command, args []string) error {
 	filePath := args[0]
 
@@ -168,6 +145,11 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	cidBase32hex, err := computeCID(hash, isJSON)
 	if err != nil {
 		return err
+	}
+
+	if hashOnly {
+		fmt.Println(cidBase32hex)
+		return nil
 	}
 
 	storageBackend, err := getStorageBackend()
