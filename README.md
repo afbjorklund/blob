@@ -19,7 +19,7 @@ See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
 ### Compute hash only
 
 ```bash
-blob add --only-hash <file>
+blob hash <file>
 ```
 
 ### Add to blob store
