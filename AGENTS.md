@@ -14,6 +14,7 @@ golangci-lint run          # govet + gocyclo; gofmt/goimports formatters
 - `blob hash <file>` — print `sha256sum`-style `<cid>  <file>` (two spaces) without storing (equivalent to what `ipfs add --only-hash` gives after the `added` prefix is stripped)
 - `blob get <cid|name> -o <out>` — retrieve; argument is parsed as a CID first, falling back to the name index (so `get` round-trips a name passed to `add`); `-o` defaults to using the argument as filename
 - Global flags: `--storage`/`-s dir|sql` (default `dir`), `--path`/`-p` (default `./.blob-store`)
+- Env defaults: `BLOB_STORAGE_TYPE` (type) and `BLOB_STORAGE_PATH` (path) are used as the flag defaults when the flag is not explicitly set; the flag always wins
 
 ## Non-Obvious Details
 

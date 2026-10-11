@@ -23,6 +23,20 @@ var (
 	hashOnly    bool
 )
 
+func defaultStorageType() string {
+	if v := os.Getenv("BLOB_STORAGE_TYPE"); v != "" {
+		return v
+	}
+	return "dir"
+}
+
+func defaultStoragePath() string {
+	if v := os.Getenv("BLOB_STORAGE_PATH"); v != "" {
+		return v
+	}
+	return "./.blob-store"
+}
+
 func main() {
 	rootCmd := &cobra.Command{
 		Use:     "blob",
@@ -30,8 +44,8 @@ func main() {
 		Version: "0.1.0",
 	}
 
-	rootCmd.PersistentFlags().StringVarP(&storageType, "storage", "s", "dir", "storage backend (dir or sql)")
-	rootCmd.PersistentFlags().StringVarP(&storagePath, "path", "p", "./.blob-store", "storage path")
+	rootCmd.PersistentFlags().StringVarP(&storageType, "storage", "s", defaultStorageType(), "storage backend (dir or sql)")
+	rootCmd.PersistentFlags().StringVarP(&storagePath, "path", "p", defaultStoragePath(), "storage path")
 
 	addCmd := &cobra.Command{
 		Use:   "add <file>",
