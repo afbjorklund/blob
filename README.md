@@ -15,8 +15,7 @@ A content-addressable blob store using CID (Content ID) addressing with pluggabl
 ### Compute hash only
 
 ```bash
-blob <file>
-blob hash <file>
+blob add --only-hash <file>
 ```
 
 ### Add to blob store
