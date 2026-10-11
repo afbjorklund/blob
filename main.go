@@ -7,13 +7,13 @@ import (
 	"os"
 	"path/filepath"
 
+	"blob/storage"
+
 	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multibase"
 	"github.com/multiformats/go-multicodec"
 	"github.com/multiformats/go-multihash"
 	"github.com/spf13/cobra"
-
-	"blob/storage"
 )
 
 var (
@@ -64,15 +64,6 @@ func main() {
 
 	rootCmd.AddCommand(getCmd)
 
-	lookupCmd := &cobra.Command{
-		Use:   "lookup <name>",
-		Short: "Look up the CID of a file name in the index",
-		Args:  cobra.ExactArgs(1),
-		RunE:  runLookup,
-	}
-
-	rootCmd.AddCommand(lookupCmd)
-
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -97,7 +88,7 @@ func isJSON(data []byte) bool {
 	return data[0] == '{' || data[0] == '['
 }
 
-func computeHash(filePath string) ([]byte, error) {
+func computeHash(filePath string) (storage.Digest, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
@@ -128,7 +119,7 @@ func isJSONFile(filePath string) (bool, error) {
 	return isJSON(buf), nil
 }
 
-func computeCID(hash []byte, isJSON bool) (string, error) {
+func computeCID(hash storage.Digest, isJSON bool) (string, error) {
 	mh, err := multihash.Encode(hash, multihash.SHA2_256)
 	if err != nil {
 		return "", err
@@ -147,6 +138,25 @@ func computeCID(hash []byte, isJSON bool) (string, error) {
 	}
 
 	return s, nil
+}
+
+func digestFromCID(c cid.Cid) (storage.Digest, error) {
+	if !supportedCodecs()[c.Type()] {
+		return nil, fmt.Errorf("unsupported codec %q: this store only holds %q",
+			codecName(c.Type()), "raw and json")
+	}
+
+	mh := c.Hash()
+	decoded, err := multihash.Decode(mh)
+	if err != nil {
+		return nil, err
+	}
+
+	if decoded.Code != multihash.SHA2_256 {
+		return nil, fmt.Errorf("unsupported hash algorithm: %d", decoded.Code)
+	}
+
+	return decoded.Digest, nil
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
@@ -205,7 +215,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	name := filepath.Base(filePath)
-	if err := storageBackend.Index(name, cidBase32hex); err != nil {
+	if err := storageBackend.Index(name, hash); err != nil {
 		return err
 	}
 
@@ -240,77 +250,49 @@ func runHash(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runLookup(cmd *cobra.Command, args []string) error {
-	name := args[0]
-
-	storageBackend, err := getStorageBackend()
-	if err != nil {
-		return err
-	}
-	defer storageBackend.Close()
-
-	cid, err := storageBackend.Lookup(name)
-	if err != nil {
-		return err
-	}
-
-	fmt.Println(cid)
-	return nil
-}
-
-func cidFromName(name string) (cid.Cid, error) {
-	storageBackend, err := getStorageBackend()
-	if err != nil {
-		return cid.Undef, err
-	}
-	defer storageBackend.Close()
-
-	cidStr, err := storageBackend.Lookup(name)
-	if err != nil {
-		return cid.Undef, fmt.Errorf("%q: name not found in index", name)
-	}
-
-	return cid.Parse(cidStr)
-}
-
 func runGet(cmd *cobra.Command, args []string) error {
-	c, err := cid.Parse(args[0])
+	arg := args[0]
+
+	c, err := cid.Parse(arg)
 	if err != nil {
-		c, err = cidFromName(args[0])
-		if err != nil {
-			return err
+		backend, berr := getStorageBackend()
+		if berr != nil {
+			return berr
 		}
+		defer backend.Close()
+
+		hash, lerr := backend.Lookup(arg)
+		if lerr != nil {
+			return fmt.Errorf("%q: name not found in index", arg)
+		}
+
+		if outputPath == "" {
+			outputPath = arg
+		}
+
+		return writeBlob(cmd, backend, hash, arg)
 	}
 
-	codec := c.Type()
-	if !supportedCodecs()[codec] {
-		return fmt.Errorf("unsupported codec %q: this store only holds %q",
-			codecName(codec), "raw and json")
+	hash, err := digestFromCID(c)
+	if err != nil {
+		return err
 	}
 
 	if outputPath == "" {
-		outputPath = args[0]
+		outputPath = arg
 	}
 
-	mh := c.Hash()
-	decoded, err := multihash.Decode(mh)
+	backend, err := getStorageBackend()
 	if err != nil {
 		return err
 	}
+	defer backend.Close()
 
-	if decoded.Code != multihash.SHA2_256 {
-		return fmt.Errorf("unsupported hash algorithm: %d", decoded.Code)
-	}
+	return writeBlob(cmd, backend, hash, arg)
+}
 
-	hash := decoded.Digest
-
-	storageBackend, err := getStorageBackend()
-	if err != nil {
-		return err
-	}
-	defer storageBackend.Close()
-
-	reader, _, err := storageBackend.Get(hash)
+func writeBlob(cmd *cobra.Command, backend storage.StorageBackend, hash storage.Digest, label string) error {
+	reader, _, err := backend.Get(hash)
 	if err != nil {
 		return err
 	}
@@ -326,7 +308,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Printf("Retrieved: %s -> %s\n", args[0], outputPath)
+	fmt.Printf("Retrieved: %s -> %s\n", label, outputPath)
 	return nil
 }
 

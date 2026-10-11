@@ -1,10 +1,13 @@
 package storage
 
 import (
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 )
 
 type DirStorage struct {
@@ -19,20 +22,21 @@ func NewDirStorage(rootDir string) (*DirStorage, error) {
 	return &DirStorage{rootDir: rootDir}, nil
 }
 
-func (s *DirStorage) Put(hash []byte, size int64, r io.Reader) error {
-	hexHash := fmt.Sprintf("%x", hash)
-	prefix := hexHash[:2]
+// relPath is the in-store path of a blob, relative to the root dir:
+// "<first 2 hex chars>/<rest of hex>".
+func (s *DirStorage) relPath(hash Digest) string {
+	hexHash := hex.EncodeToString(hash)
+	return path.Join(hexHash[:2], hexHash[2:])
+}
 
-	dir := filepath.Join(s.rootDir, prefix)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+func (s *DirStorage) Put(hash Digest, size int64, r io.Reader) error {
+	dst := path.Join(s.rootDir, s.relPath(hash))
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
 
-	rest := hexHash[2:]
-	filename := rest
-
-	path := filepath.Join(dir, filename)
-	tmpPath := path + ".tmp"
+	tmpPath := dst + ".tmp"
 
 	f, err := os.Create(tmpPath)
 	if err != nil {
@@ -49,18 +53,11 @@ func (s *DirStorage) Put(hash []byte, size int64, r io.Reader) error {
 		return err
 	}
 
-	return os.Rename(tmpPath, path)
+	return os.Rename(tmpPath, dst)
 }
 
-func (s *DirStorage) Get(hash []byte) (io.ReadCloser, int64, error) {
-	hexHash := fmt.Sprintf("%x", hash)
-	prefix := hexHash[:2]
-	rest := hexHash[2:]
-
-	filename := rest
-	path := filepath.Join(s.rootDir, prefix, filename)
-
-	f, err := os.Open(path)
+func (s *DirStorage) Get(hash Digest) (io.ReadCloser, int64, error) {
+	f, err := os.Open(filepath.Join(s.rootDir, s.relPath(hash)))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -74,15 +71,8 @@ func (s *DirStorage) Get(hash []byte) (io.ReadCloser, int64, error) {
 	return f, stat.Size(), nil
 }
 
-func (s *DirStorage) Has(hash []byte) (bool, error) {
-	hexHash := fmt.Sprintf("%x", hash)
-	prefix := hexHash[:2]
-	rest := hexHash[2:]
-
-	filename := rest
-	path := filepath.Join(s.rootDir, prefix, filename)
-
-	_, err := os.Stat(path)
+func (s *DirStorage) Has(hash Digest) (bool, error) {
+	_, err := os.Stat(filepath.Join(s.rootDir, s.relPath(hash)))
 	if err == nil {
 		return true, nil
 	}
@@ -92,29 +82,51 @@ func (s *DirStorage) Has(hash []byte) (bool, error) {
 	return false, err
 }
 
-func (s *DirStorage) Index(name, cid string) error {
+// Index stores a symlink index/<name> -> ../<prefix>/<rest> pointing at
+// the blob, so following the entry directly yields the content.
+func (s *DirStorage) Index(name string, hash Digest) error {
+	if strings.ContainsRune(name, os.PathSeparator) || name == ".." {
+		return fmt.Errorf("invalid index name %q", name)
+	}
+
 	indexDir := filepath.Join(s.rootDir, "index")
 	if err := os.MkdirAll(indexDir, 0755); err != nil {
 		return err
 	}
 
-	path := filepath.Join(indexDir, name)
-	tmpPath := path + ".tmp"
+	dst := path.Join(indexDir, name)
+	tmpPath := dst + ".tmp"
 
-	if err := os.WriteFile(tmpPath, []byte(cid), 0644); err != nil {
+	target := "../" + s.relPath(hash)
+	if err := os.Symlink(target, tmpPath); err != nil {
 		return err
 	}
 
-	return os.Rename(tmpPath, path)
+	return os.Rename(tmpPath, dst)
 }
 
-func (s *DirStorage) Lookup(name string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(s.rootDir, "index", name))
+func (s *DirStorage) Lookup(name string) (Digest, error) {
+	link, err := os.Readlink(filepath.Join(s.rootDir, "index", name))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	return string(data), nil
+	target, ok := strings.CutPrefix(link, "../")
+	if !ok {
+		return nil, fmt.Errorf("index entry %q points outside the store: %q", name, link)
+	}
+
+	prefix, rest, ok := strings.Cut(target, "/")
+	if !ok || len(prefix) != 2 || len(rest) != 2*32-2 {
+		return nil, fmt.Errorf("index entry %q is not a valid blob path: %q", name, link)
+	}
+
+	digest, err := hex.DecodeString(prefix + rest)
+	if err != nil {
+		return nil, fmt.Errorf("index entry %q is not a valid blob path: %q", name, link)
+	}
+
+	return digest, nil
 }
 
 func (s *DirStorage) Close() error {

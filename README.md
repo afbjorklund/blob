@@ -12,7 +12,7 @@ See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
   - Directory (`--path` dir; files sharded under `<first 2 hex chars of SHA-256>/<rest of hex>`)
   - SQLite (single database file at `--path`)
 - **Streaming I/O** - Files are streamed to and from the backend without materializing the entire blob in memory. The `sqlite` backend reads via SQLite's blob API (`db.OpenBlob` in a read-only handle) instead of loading the whole row
-- **Name index** - A separate, backend-agnostic name → CID map (symlink-style) lets you recover the CID for an original filename (e.g. `ubuntu_latest.sif` and `ubuntu_26.04.sif` both resolve to the same CID). Last add wins, so `latest`-style aliases update as new content is stored
+- **Name index** - A separate per-name index in each backend (symlink in the dir backend, foreign-keyed table in the sql backend) lets you retrieve a blob by its original filename (e.g. `ubuntu_latest.sif` and `ubuntu_26.04.sif` both resolve to the same blob). Last add wins, so `latest`-style aliases update as new content is stored
 
 ## Usage
 
@@ -47,17 +47,13 @@ blob get ubuntu_latest.sif -o output.sif
 Options:
 - `-o <output-file>` - Output file path (defaults to the argument as filename)
 
-### Look up a CID by name
+### Name index
 
-Every `add` records `basename(file) → CID` in the index. Use `lookup` to recover the CID for a name:
+Every non-`--only-hash` `add` records `basename(file) → blob digest` in the backend's own index, so a name later resolves to the exact stored blob (dir backend: a `index/<name>` symlink to the blob; sql backend: a `names` row keyed on the blob's hash).
 
-```bash
-blob lookup <name>
-```
-
-- The index key is the file's **basename** (expected to be a readable name like `ubuntu.sif`, not a CID), so paths and aliases with the same name all map to the same CID
-- **Last add wins**: re-adding a name points it at the newest CID, which is how `latest`-style aliases stay current
-- Names are not unique per CID — two names can map to the same blob (e.g. `ubuntu_26.04.sif` and `ubuntu_latest.sif`)
+- The index key is the file's **basename** (expected to be a readable name like `ubuntu.sif`, not a CID), so paths and aliases with the same name all map to the same blob
+- **Last add wins**: re-adding a name points it at the newest blob, which is how `latest`-style aliases stay current
+- Names are not unique per blob — two names can map to the same content (e.g. `ubuntu_26.04.sif` and `ubuntu_latest.sif`)
 - `--only-hash` skips the index entirely
 
 ## Examples
@@ -90,8 +86,8 @@ $ cp ubuntu_26.04.sif ubuntu_latest.sif
 $ blob add ubuntu_latest.sif
 File already exists in store: v05ah48...j8dg
 
-$ blob lookup ubuntu_latest.sif
-v05ah48...j8dg
+$ blob get ubuntu_latest.sif -o latest.sif
+Retrieved: ubuntu_latest.sif -> latest.sif
 ```
 
 ### SQLite backend

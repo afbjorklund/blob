@@ -12,12 +12,15 @@ const (
 	StorageSQL StorageType = "sql"
 )
 
+// Digest is the sha256 digest that keys the CAS in every backend.
+type Digest = []byte
+
 type StorageBackend interface {
-	Put(hash []byte, size int64, r io.Reader) error
-	Get(hash []byte) (io.ReadCloser, int64, error)
-	Has(hash []byte) (bool, error)
-	Index(name, cid string) error
-	Lookup(name string) (string, error)
+	Put(hash Digest, size int64, r io.Reader) error
+	Get(hash Digest) (io.ReadCloser, int64, error)
+	Has(hash Digest) (bool, error)
+	Index(name string, hash Digest) error
+	Lookup(name string) (Digest, error)
 	Close() error
 }
 

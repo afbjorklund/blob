@@ -3,46 +3,42 @@ package storage
 import (
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
 
 	"zombiezen.com/go/sqlite"
 	"zombiezen.com/go/sqlite/sqlitex"
 )
 
 type SQLStorage struct {
-	dbPath string
-	db     *sqlite.Conn
+	db *sqlite.Conn
 }
 
 func NewSQLStorage(dbPath string) (*SQLStorage, error) {
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-		return nil, err
-	}
-
 	db, err := sqlite.OpenConn(dbPath, sqlite.OpenCreate|sqlite.OpenReadWrite)
 	if err != nil {
 		return nil, err
 	}
 
-	createBlobs := "CREATE TABLE IF NOT EXISTS blobs (hash TEXT PRIMARY KEY, data BLOB NOT NULL)"
+	if err := sqlitex.ExecuteTransient(db, "PRAGMA foreign_keys = ON", nil); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
+	createBlobs := "CREATE TABLE IF NOT EXISTS blobs (hash BLOB PRIMARY KEY, data BLOB NOT NULL)"
 	if err := sqlitex.ExecuteTransient(db, createBlobs, nil); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 
-	createNames := "CREATE TABLE IF NOT EXISTS names (name TEXT PRIMARY KEY, cid TEXT NOT NULL)"
-
+	createNames := "CREATE TABLE IF NOT EXISTS names (name TEXT PRIMARY KEY, hash BLOB NOT NULL REFERENCES blobs(hash))"
 	if err := sqlitex.ExecuteTransient(db, createNames, nil); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 
-	return &SQLStorage{dbPath: dbPath, db: db}, nil
+	return &SQLStorage{db: db}, nil
 }
 
-func (s *SQLStorage) Put(hash []byte, size int64, r io.Reader) error {
+func (s *SQLStorage) Put(hash Digest, size int64, r io.Reader) error {
 	var errValue error
 	endFn := sqlitex.Transaction(s.db)
 	defer endFn(&errValue)
@@ -72,7 +68,7 @@ func (s *SQLStorage) Put(hash []byte, size int64, r io.Reader) error {
 	return err
 }
 
-func (s *SQLStorage) Get(hash []byte) (io.ReadCloser, int64, error) {
+func (s *SQLStorage) Get(hash Digest) (io.ReadCloser, int64, error) {
 	var rowid int64
 	var size int64
 	found := false
@@ -104,7 +100,7 @@ func (s *SQLStorage) Get(hash []byte) (io.ReadCloser, int64, error) {
 	return blob, size, nil
 }
 
-func (s *SQLStorage) Has(hash []byte) (bool, error) {
+func (s *SQLStorage) Has(hash Digest) (bool, error) {
 	var count int
 	err := sqlitex.ExecuteTransient(
 		s.db,
@@ -123,37 +119,41 @@ func (s *SQLStorage) Has(hash []byte) (bool, error) {
 	return count > 0, nil
 }
 
-func (s *SQLStorage) Index(name, cid string) error {
+func (s *SQLStorage) Index(name string, hash Digest) error {
 	return sqlitex.ExecuteTransient(
 		s.db,
-		"INSERT OR REPLACE INTO names (name, cid) VALUES (?, ?)",
-		&sqlitex.ExecOptions{Args: []any{name, cid}},
+		"INSERT OR REPLACE INTO names (name, hash) VALUES (?, ?)",
+		&sqlitex.ExecOptions{Args: []any{name, hash}},
 	)
 }
 
-func (s *SQLStorage) Lookup(name string) (string, error) {
-	var cid string
+func (s *SQLStorage) Lookup(name string) (Digest, error) {
+	var hash []byte
 	found := false
 	err := sqlitex.ExecuteTransient(
 		s.db,
-		"SELECT cid FROM names WHERE name = ?",
+		"SELECT hash FROM names WHERE name = ?",
 		&sqlitex.ExecOptions{
 			Args: []any{name},
 			ResultFunc: func(stmt *sqlite.Stmt) error {
+				var err error
+				hash, err = io.ReadAll(stmt.ColumnReader(0))
+				if err != nil {
+					return err
+				}
 				found = true
-				cid = stmt.ColumnText(0)
 				return nil
 			},
 		},
 	)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if !found {
-		return "", errors.New("name not found")
+		return nil, errors.New("name not found")
 	}
 
-	return cid, nil
+	return hash, nil
 }
 
 func (s *SQLStorage) Close() error {
