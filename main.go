@@ -54,8 +54,8 @@ func main() {
 	rootCmd.AddCommand(hashCmd)
 
 	getCmd := &cobra.Command{
-		Use:   "get <cid>",
-		Short: "Retrieve a file from the blob store",
+		Use:   "get <cid|name>",
+		Short: "Retrieve a file from the blob store (by CID or indexed name)",
 		Args:  cobra.ExactArgs(1),
 		RunE:  runGet,
 	}
@@ -258,10 +258,28 @@ func runLookup(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func cidFromName(name string) (cid.Cid, error) {
+	storageBackend, err := getStorageBackend()
+	if err != nil {
+		return cid.Undef, err
+	}
+	defer storageBackend.Close()
+
+	cidStr, err := storageBackend.Lookup(name)
+	if err != nil {
+		return cid.Undef, fmt.Errorf("%q: name not found in index", name)
+	}
+
+	return cid.Parse(cidStr)
+}
+
 func runGet(cmd *cobra.Command, args []string) error {
 	c, err := cid.Parse(args[0])
 	if err != nil {
-		return err
+		c, err = cidFromName(args[0])
+		if err != nil {
+			return err
+		}
 	}
 
 	codec := c.Type()

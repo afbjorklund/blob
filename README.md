@@ -32,11 +32,17 @@ Options:
 ### Get from blob store
 
 ```bash
-blob get <cid> -o <output-file>
+blob get <cid|name> -o <output-file>
+```
+
+Retrieves by CID, or falls back to the name index if the argument is not a valid CID:
+
+```bash
+blob get ubuntu_latest.sif -o output.sif
 ```
 
 Options:
-- `-o <output-file>` - Output file path (defaults to the CID string as filename)
+- `-o <output-file>` - Output file path (defaults to the argument as filename)
 
 ### Look up a CID by name
 
@@ -50,6 +56,7 @@ blob lookup <name>
 - **Last add wins**: re-adding a name points it at the newest CID, which is how `latest`-style aliases stay current
 - Names are not unique per CID — two names can map to the same blob (e.g. `ubuntu_26.04.sif` and `ubuntu_latest.sif`)
 - `--only-hash` skips the index entirely
+- Unlike `ipfs add -w`, which also mints a directory-node CID to remember, the index lets `get` round-trip one CID by filename
 
 ## Examples
 
@@ -58,6 +65,9 @@ blob lookup <name>
 ```console
 $ blob add test.txt
 Added: v05ah487ip8drdhv90v86rbv4d1v5f7ueeqpnsjkjmtg508mqabjcpgjfq8
+
+$ blob get test.txt -o output.txt
+Retrieved: test.txt -> output.txt
 
 $ blob get v05ah487ip8drdhv90v86rbv4d1v5f7ueeqpnsjkjmtg508mqabjcpgjfq8 -o output.txt
 Retrieved: v05ah487ip8drdhv90v86rbv4d1v5f7ueeqpnsjkjmtg508mqabjcpgjfq8 -> output.txt
