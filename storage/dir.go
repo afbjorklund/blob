@@ -29,7 +29,7 @@ func (s *DirStorage) Put(digest []byte, r io.Reader) error {
 	}
 
 	rest := hexDigest[2:]
-	filename := prefix + "-" + rest
+	filename := rest
 
 	path := filepath.Join(dir, filename)
 	tmpPath := path + ".tmp"
