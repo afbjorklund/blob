@@ -209,7 +209,16 @@ func runGet(cmd *cobra.Command, args []string) error {
 	}
 
 	mh := c.Hash()
-	hash := mh[2:]
+	decoded, err := multihash.Decode(mh)
+	if err != nil {
+		return err
+	}
+
+	if decoded.Code != multihash.SHA2_256 {
+		return fmt.Errorf("unsupported hash algorithm: %d", decoded.Code)
+	}
+
+	hash := decoded.Digest
 
 	storageBackend, err := getStorageBackend()
 	if err != nil {
