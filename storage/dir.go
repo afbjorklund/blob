@@ -91,3 +91,7 @@ func (s *DirStorage) Has(hash []byte) (bool, error) {
 	}
 	return false, err
 }
+
+func (s *DirStorage) Close() error {
+	return nil
+}

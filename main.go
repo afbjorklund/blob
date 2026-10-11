@@ -156,6 +156,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer storageBackend.Close()
 
 	has, err := storageBackend.Has(hash)
 	if err != nil {
@@ -206,6 +207,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer storageBackend.Close()
 
 	reader, _, err := storageBackend.Get(hash)
 	if err != nil {

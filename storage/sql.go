@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"bytes"
 	"errors"
 	"io"
 	"os"
@@ -28,28 +27,10 @@ func NewSQLStorage(dbPath string) (*SQLStorage, error) {
 
 	createTable := "CREATE TABLE IF NOT EXISTS blobs (hash TEXT PRIMARY KEY, data BLOB NOT NULL)"
 
-	var errValue error
-	endFn := sqlitex.Transaction(db)
-	stmt, err := db.Prepare(createTable)
-	if err != nil {
-		errValue = err
-		endFn(&errValue)
+	if err := sqlitex.ExecuteTransient(db, createTable, nil); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	if _, err := stmt.Step(); err != nil {
-		errValue = err
-		endFn(&errValue)
-		if err := stmt.Finalize(); err != nil {
-			return nil, err
-		}
-		_ = db.Close()
-		return nil, err
-	}
-	if err := stmt.Finalize(); err != nil {
-		return nil, err
-	}
-	endFn(&errValue)
 
 	return &SQLStorage{dbPath: dbPath, db: db}, nil
 }
@@ -80,49 +61,40 @@ func (s *SQLStorage) Put(hash []byte, size int64, r io.Reader) error {
 	}
 	defer blob.Close()
 
-	var buf [32 * 1024]byte
-	for {
-		n, readErr := r.Read(buf[:])
-		if n > 0 {
-			if _, writeErr := blob.Write(buf[:n]); writeErr != nil {
-				return writeErr
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return readErr
-		}
-	}
-
-	return nil
+	_, err = blob.ReadFrom(r)
+	return err
 }
 
 func (s *SQLStorage) Get(hash []byte) (io.ReadCloser, int64, error) {
-	var data []byte
-	size := int64(0)
+	var rowid int64
+	var size int64
+	found := false
 	err := sqlitex.ExecuteTransient(
 		s.db,
-		"SELECT data FROM blobs WHERE hash = ?",
+		"SELECT rowid, length(data) FROM blobs WHERE hash = ?",
 		&sqlitex.ExecOptions{
 			Args: []any{hash},
 			ResultFunc: func(stmt *sqlite.Stmt) error {
-				size = int64(stmt.ColumnLen(0))
-				data = make([]byte, size)
-				stmt.ColumnBytes(0, data)
+				found = true
+				rowid = stmt.ColumnInt64(0)
+				size = stmt.ColumnInt64(1)
 				return nil
 			},
 		},
 	)
 	if err != nil {
-		if sqlite.ErrCode(err) == sqlite.ResultNotFound {
-			return nil, 0, errors.New("blob not found")
-		}
+		return nil, 0, err
+	}
+	if !found {
+		return nil, 0, errors.New("blob not found")
+	}
+
+	blob, err := s.db.OpenBlob("", "blobs", "data", rowid, false)
+	if err != nil {
 		return nil, 0, err
 	}
 
-	return io.NopCloser(bytes.NewReader(data)), size, nil
+	return blob, size, nil
 }
 
 func (s *SQLStorage) Has(hash []byte) (bool, error) {

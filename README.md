@@ -8,7 +8,7 @@ A content-addressable blob store using CID (Content ID) addressing with pluggabl
 - **Pluggable storage backends**:
   - Directory (`--path` dir; files sharded under `<first 2 hex chars of SHA-256>/<rest of hex>`)
   - SQLite (single database file at `--path`)
-- **Streaming writes** - Files are streamed to the backend without loading the entire file into memory (the SQLite backend does buffer full blobs in memory on read)
+- **Streaming I/O** - Files are streamed to and from the backend without materializing the entire blob in memory. The `sqlite` backend reads via SQLite's blob API (`db.OpenBlob` in a read-only handle) instead of loading the whole row
 
 ## Usage
 
