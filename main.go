@@ -93,14 +93,16 @@ func runHash(cmd *cobra.Command, args []string) error {
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
-	file, err := os.Open(args[0])
+	filePath := args[0]
+
+	file, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
+		file.Close()
 		return err
 	}
 
@@ -108,6 +110,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 	mh, err := multihash.Encode(digest, multihash.SHA2_256)
 	if err != nil {
+		file.Close()
 		return err
 	}
 
@@ -115,8 +118,11 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 	cidBase32hex, err := c.StringOfBase(multibase.Base32hex)
 	if err != nil {
+		file.Close()
 		return err
 	}
+
+	file.Close()
 
 	storageBackend, err := getStorageBackend()
 	if err != nil {
@@ -132,6 +138,12 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		fmt.Printf("File already exists in store: %s\n", cidBase32hex)
 		return nil
 	}
+
+	file, err = os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
 
 	if err := storageBackend.Put(digest, file); err != nil {
 		return err
