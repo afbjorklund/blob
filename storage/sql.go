@@ -39,11 +39,15 @@ func NewSQLStorage(dbPath string) (*SQLStorage, error) {
 	if _, err := stmt.Step(); err != nil {
 		errValue = err
 		endFn(&errValue)
-		stmt.Finalize()
+		if err := stmt.Finalize(); err != nil {
+			return nil, err
+		}
 		_ = db.Close()
 		return nil, err
 	}
-	stmt.Finalize()
+	if err := stmt.Finalize(); err != nil {
+		return nil, err
+	}
 	endFn(&errValue)
 
 	return &SQLStorage{dbPath: dbPath, db: db}, nil
@@ -97,7 +101,11 @@ func (s *SQLStorage) PutStream(digest []byte, r io.Reader) error {
 		endFn(&errValue)
 		return err
 	}
-	stmt.Reset()
+	if err := stmt.Reset(); err != nil {
+		errValue = err
+		endFn(&errValue)
+		return err
+	}
 
 	blob, err := s.db.OpenBlob("", "blobs", "data", 1, true)
 	if err != nil {
