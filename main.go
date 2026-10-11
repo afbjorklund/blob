@@ -123,6 +123,10 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+
 	err = file.Close()
 	if err != nil {
 		return err
@@ -149,7 +153,12 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 	defer file.Close()
 
-	if err := storageBackend.Put(digest, file); err != nil {
+	stat, err := file.Stat()
+	if err != nil {
+		return err
+	}
+
+	if err := storageBackend.Put(digest, stat.Size(), file); err != nil {
 		return err
 	}
 
@@ -175,7 +184,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	reader, err := storageBackend.Get(digest)
+	reader, _, err := storageBackend.Get(digest)
 	if err != nil {
 		return err
 	}

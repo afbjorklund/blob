@@ -13,8 +13,8 @@ const (
 )
 
 type StorageBackend interface {
-	Put(digest []byte, r io.Reader) error
-	Get(digest []byte) (io.ReadCloser, error)
+	Put(digest []byte, size int64, r io.Reader) error
+	Get(digest []byte) (io.ReadCloser, int64, error)
 	Has(digest []byte) (bool, error)
 }
 

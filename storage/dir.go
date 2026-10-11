@@ -19,7 +19,7 @@ func NewDirStorage(rootDir string) (*DirStorage, error) {
 	return &DirStorage{rootDir: rootDir}, nil
 }
 
-func (s *DirStorage) Put(digest []byte, r io.Reader) error {
+func (s *DirStorage) Put(digest []byte, size int64, r io.Reader) error {
 	hexDigest := fmt.Sprintf("%x", digest)
 	prefix := hexDigest[:2]
 
@@ -52,7 +52,7 @@ func (s *DirStorage) Put(digest []byte, r io.Reader) error {
 	return os.Rename(tmpPath, path)
 }
 
-func (s *DirStorage) Get(digest []byte) (io.ReadCloser, error) {
+func (s *DirStorage) Get(digest []byte) (io.ReadCloser, int64, error) {
 	hexDigest := fmt.Sprintf("%x", digest)
 	prefix := hexDigest[:2]
 	rest := hexDigest[2:]
@@ -60,7 +60,18 @@ func (s *DirStorage) Get(digest []byte) (io.ReadCloser, error) {
 	filename := rest
 	path := filepath.Join(s.rootDir, prefix, filename)
 
-	return os.Open(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	stat, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, 0, err
+	}
+
+	return f, stat.Size(), nil
 }
 
 func (s *DirStorage) Has(digest []byte) (bool, error) {
