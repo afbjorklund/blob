@@ -57,23 +57,25 @@ func NewSQLStorage(dbPath string) (*SQLStorage, error) {
 func (s *SQLStorage) Put(digest []byte, size int64, r io.Reader) error {
 	var errValue error
 	endFn := sqlitex.Transaction(s.db)
+	defer endFn(&errValue)
 
-	err := sqlitex.ExecuteTransient(
-		s.db,
-		"INSERT INTO blobs (digest, data) VALUES (?, zeroblob(?))",
-		&sqlitex.ExecOptions{
-			Args: []any{digest, size},
-		},
-	)
+	stmt, err := s.db.Prepare("INSERT INTO blobs (digest, data) VALUES (?, zeroblob(?))")
 	if err != nil {
-		endFn(&errValue)
+		return err
+	}
+	defer stmt.Finalize()
+
+	stmt.BindBytes(1, digest)
+	stmt.BindInt64(2, size)
+
+	if _, err := stmt.Step(); err != nil {
 		return err
 	}
 
-	blob, err := s.db.OpenBlob("", "blobs", "data", s.db.LastInsertRowID(), true)
+	rowid := s.db.LastInsertRowID()
+
+	blob, err := s.db.OpenBlob("", "blobs", "data", rowid, true)
 	if err != nil {
-		errValue = err
-		endFn(&errValue)
 		return err
 	}
 	defer blob.Close()
@@ -83,8 +85,6 @@ func (s *SQLStorage) Put(digest []byte, size int64, r io.Reader) error {
 		n, readErr := r.Read(buf[:])
 		if n > 0 {
 			if _, writeErr := blob.Write(buf[:n]); writeErr != nil {
-				errValue = writeErr
-				endFn(&errValue)
 				return writeErr
 			}
 		}
@@ -92,13 +92,9 @@ func (s *SQLStorage) Put(digest []byte, size int64, r io.Reader) error {
 			break
 		}
 		if readErr != nil {
-			errValue = readErr
-			endFn(&errValue)
 			return readErr
 		}
 	}
-
-	endFn(&errValue)
 
 	return nil
 }
