@@ -15,8 +15,9 @@ import (
 )
 
 var (
-	storageType string
-	storagePath string
+	storageType  string
+	storagePath  string
+	outputPath   string
 )
 
 func main() {
@@ -48,11 +49,13 @@ func main() {
 	rootCmd.AddCommand(addCmd)
 
 	getCmd := &cobra.Command{
-		Use:   "get <cid> <output>",
+		Use:   "get <cid>",
 		Short: "Retrieve a file from the blob store",
-		Args:  cobra.ExactArgs(2),
+		Args:  cobra.ExactArgs(1),
 		RunE:  runGet,
 	}
+
+	getCmd.Flags().StringVarP(&outputPath, "output", "o", "", "output file path")
 
 	rootCmd.AddCommand(getCmd)
 
@@ -159,6 +162,10 @@ func runGet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if outputPath == "" {
+		outputPath = args[0]
+	}
+
 	mh := c.Hash()
 	digest := mh[2:]
 
@@ -173,7 +180,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 	}
 	defer reader.Close()
 
-	out, err := os.Create(args[1])
+	out, err := os.Create(outputPath)
 	if err != nil {
 		return err
 	}
@@ -183,7 +190,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Printf("Retrieved: %s -> %s\n", args[0], args[1])
+	fmt.Printf("Retrieved: %s -> %s\n", args[0], outputPath)
 	return nil
 }
 
