@@ -15,9 +15,9 @@ import (
 )
 
 var (
-	storageType  string
-	storagePath  string
-	outputPath   string
+	storageType string
+	storagePath string
+	outputPath  string
 )
 
 func main() {

@@ -57,7 +57,7 @@ func (s *DirStorage) Get(digest []byte) (io.ReadCloser, error) {
 	prefix := hexDigest[:2]
 	rest := hexDigest[2:]
 
-	filename := prefix + "-" + rest
+	filename := rest
 	path := filepath.Join(s.rootDir, prefix, filename)
 
 	return os.Open(path)
@@ -68,7 +68,7 @@ func (s *DirStorage) Has(digest []byte) (bool, error) {
 	prefix := hexDigest[:2]
 	rest := hexDigest[2:]
 
-	filename := prefix + "-" + rest
+	filename := rest
 	path := filepath.Join(s.rootDir, prefix, filename)
 
 	_, err := os.Stat(path)
