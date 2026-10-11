@@ -6,9 +6,9 @@ A content-addressable blob store using CID (Content ID) addressing with pluggabl
 
 - **CIDv1 with base32hex encoding** - IPFS-compatible content addressing
 - **Pluggable storage backends**:
-  - Directory (2-char prefix of the full hash filename)
-  - SQLite (single database file)
-- **Streaming I/O** - Handles large files without loading into memory
+  - Directory (`--path` dir; files sharded under `<first 2 hex chars of SHA-256>/<rest of hex>`)
+  - SQLite (single database file at `--path`)
+- **Streaming writes** - Files are streamed to the backend without loading the entire file into memory (the SQLite backend does buffer full blobs in memory on read)
 
 ## Usage
 
@@ -31,8 +31,11 @@ Options:
 ### Get from blob store
 
 ```bash
-blob get <cid> <output-file>
+blob get <cid> -o <output-file>
 ```
+
+Options:
+- `-o <output-file>` - Output file path (defaults to the CID string as filename)
 
 ## Examples
 

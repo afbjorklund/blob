@@ -1,29 +1,26 @@
 # AGENTS.md
 
-A content-addressable blob store using CID (Content ID) addressing with pluggable storage backends.
+Content-addressable blob store (CIDv1, base32hex) with `dir` and `sql` (SQLite) backends. Single Go module, no tests, no CI.
 
-## Quick Start
+## Build & Commands
 
 ```bash
-go build -o blob && ./blob add file.txt
+go build -o blob
+golangci-lint run          # govet + gocyclo; gofmt/goimports formatters
 ```
 
-## Storage Backends
+- `blob add <file>` — store file (prints CID); `--only-hash`/`-n` to hash only
+- `blob get <cid> -o <out>` — retrieve; `-o` defaults to using the CID string as filename
+- Global flags: `--storage`/`-s dir|sql` (default `dir`), `--path`/`-p` (default `./.blob-store`)
 
-- **Directory** (`dir`): Files stored in `.blob-store/<2-char-prefix>/<rest-of-hash>`
-- **SQLite** (`sql`): Single database file at `--path`
+## Non-Obvious Details
 
-## Verified Commands
+- CID codec depends on content, not extension: file stored with `Json` codec only if first byte is `{` or `[` (`isJSON` in main.go); anything else is `Raw`
+- Dir backend key is hex (not the base32hex CID): `.blob-store/<first 2 hex chars>/<rest of hex>`, written via tmp-file + rename
+- SQL backend auto-creates the parent dir of `--path` and the `blobs` table (storage/sql.go); no migration steps to run
+- Storage backends never close the SQLite conn automatically from the CLI (no `Close` call in main.go)
 
-- `blob add <file>` — Add file to store (computes CIDv1 with base32hex)
-- `blob add <file> --only-hash` — Compute hash only, don't store
-- `blob get <cid> -o <output>` — Retrieve file from store
-- `blob --storage sql --path dbfile add <file>` — Use SQLite backend
+## Conventions
 
-## Key Details
-
-- CID uses SHA2-256; JSON files get Json codec, others Raw codec
-- Files stored by hash prefix (first 2 chars) in directory backend
-- SQLite requires directory creation for db path
-- `.blob-store` is gitignored; binary named `blob`
-- Go 1.26, linters: govet, gocyclo; formatters: gofmt, goimports
+- Go 1.26; `blob` binary and `.blob-store/` are gitignored
+- Verify changes with `go build ./...` and, if available, `golangci-lint run`
