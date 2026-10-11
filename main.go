@@ -176,12 +176,5 @@ func runGet(cmd *cobra.Command, args []string) error {
 }
 
 func getStorageBackend() (storage.StorageBackend, error) {
-	switch storageType {
-	case "dir":
-		return storage.NewDirStorage(storagePath)
-	case "sqlite":
-		return storage.NewSQLiteStorage(storagePath)
-	default:
-		return nil, fmt.Errorf("unknown storage backend: %s", storageType)
-	}
+	return storage.NewStorage(storage.StorageType(storageType), storagePath)
 }

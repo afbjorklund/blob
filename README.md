@@ -6,7 +6,7 @@ A content-addressable blob store using CID (Content ID) addressing with pluggabl
 
 - **CIDv1 with base32hex encoding** - IPFS-compatible content addressing
 - **Pluggable storage backends**:
-  - Directory (Git-style (2-char prefix subGit-style): hex digest with 2-byte prefix Git-style)
+  - Directory (2-char prefix with full hash filename)
   - SQLite (single database file)
 - **Streaming I/O** - Handles large files without loading into memory
 
@@ -37,7 +37,7 @@ blob get <cid> <output-file>
 
 ## Examples
 
-### Git-style backend (default)
+### Directory backend (default)
 
 ```console
 $ blob add test.txt
