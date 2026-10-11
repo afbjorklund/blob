@@ -74,36 +74,41 @@ func isJSON(data []byte) bool {
 	return data[0] == '{' || data[0] == '['
 }
 
-func computeCID(filePath string) (string, []byte, error) {
+func computeHash(filePath string) ([]byte, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 	defer file.Close()
 
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
-		return "", nil, err
+		return nil, err
 	}
 
 	digest := hash.Sum(nil)
+	return digest, nil
+}
 
-	mh, err := multihash.Encode(digest, multihash.SHA2_256)
+func computeCID(digest []byte, filePath string) (string, error) {
+	file, err := os.Open(filePath)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
+	defer file.Close()
 
-	_, err = file.Seek(0, io.SeekStart)
-	if err != nil {
-		return "", nil, err
-	}
 	buf := make([]byte, 1)
 	_, err = file.Read(buf)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 
 	isJSON := isJSON(buf)
+
+	mh, err := multihash.Encode(digest, multihash.SHA2_256)
+	if err != nil {
+		return "", err
+	}
 
 	codec := uint64(cid.Raw)
 	if isJSON {
@@ -114,14 +119,18 @@ func computeCID(filePath string) (string, []byte, error) {
 
 	cidBase32hex, err := c.StringOfBase(multibase.Base32hex)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 
-	return cidBase32hex, digest, nil
+	return cidBase32hex, nil
 }
 
 func runHash(cmd *cobra.Command, args []string) error {
-	cidBase32hex, _, err := computeCID(args[0])
+	digest, err := computeHash(args[0])
+	if err != nil {
+		return err
+	}
+	cidBase32hex, err := computeCID(digest, args[0])
 	if err != nil {
 		return err
 	}
@@ -132,7 +141,7 @@ func runHash(cmd *cobra.Command, args []string) error {
 func runAdd(cmd *cobra.Command, args []string) error {
 	filePath := args[0]
 
-	cidBase32hex, digest, err := computeCID(filePath)
+	digest, err := computeHash(filePath)
 	if err != nil {
 		return err
 	}
@@ -144,6 +153,11 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	defer file.Close()
 
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+
+	cidBase32hex, err := computeCID(digest, filePath)
+	if err != nil {
 		return err
 	}
 
