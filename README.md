@@ -1,10 +1,13 @@
 # blob
 
-A content-addressable blob store using CID (Content ID) addressing with pluggable storage backends.
+A content-addressable blob store (CAS) using CID (Content ID) addressing, similar to `ipfs` but local-only, with pluggable storage backends.
+
+See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
 
 ## Features
 
-- **CIDv1 with base32hex encoding** - IPFS-compatible content addressing
+- **Content addressing with dedup** - files are stored by their content hash (CIDv1, base32hex encoding), so identical content is stored only once, no matter how many times it is added and under which names
+- **Content-based codec** - the CID's codec byte is chosen from the content, not the extension: files starting with `{` or `[` are stored as the `Json` codec, everything else as `Raw` (see [DESIGN.md](DESIGN.md) for the rationale)
 - **Pluggable storage backends**:
   - Directory (`--path` dir; files sharded under `<first 2 hex chars of SHA-256>/<rest of hex>`)
   - SQLite (single database file at `--path`)
@@ -52,11 +55,10 @@ Every `add` records `basename(file) → CID` in the index. Use `lookup` to recov
 blob lookup <name>
 ```
 
-- The index key is the file's **basename**, so paths and aliases with the same name all map to the same CID
+- The index key is the file's **basename** (expected to be a readable name like `ubuntu.sif`, not a CID), so paths and aliases with the same name all map to the same CID
 - **Last add wins**: re-adding a name points it at the newest CID, which is how `latest`-style aliases stay current
 - Names are not unique per CID — two names can map to the same blob (e.g. `ubuntu_26.04.sif` and `ubuntu_latest.sif`)
 - `--only-hash` skips the index entirely
-- Unlike `ipfs add -w`, which also mints a directory-node CID to remember, the index lets `get` round-trip one CID by filename
 
 ## Examples
 
