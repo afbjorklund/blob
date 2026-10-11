@@ -9,7 +9,9 @@ go build -o blob
 golangci-lint run          # govet + gocyclo; gofmt/goimports formatters
 ```
 
-- `blob add <file>` — store file (prints CID); `--only-hash`/`-n` to hash only. Records `basename(file) → CID` in the name index (skipped with `--only-hash`)
+- `blob add <file>` — store file (prints CID). Records `basename(file) → CID` in the name index
+- `blob add --only-hash/-n <file>` — like `ipfs add --only-hash`: print `added <cid> <file>` (one space), do not store
+- `blob hash <file>` — print `sha256sum`-style `<cid>  <file>` (two spaces) without storing (equivalent to what `ipfs add --only-hash` gives after the `added` prefix is stripped)
 - `blob get <cid> -o <out>` — retrieve; `-o` defaults to using the CID string as filename
 - `blob lookup <name>` — print the CID for an indexed name (the file basename)
 - Global flags: `--storage`/`-s dir|sql` (default `dir`), `--path`/`-p` (default `./.blob-store`)

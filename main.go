@@ -44,6 +44,15 @@ func main() {
 
 	rootCmd.AddCommand(addCmd)
 
+	hashCmd := &cobra.Command{
+		Use:   "hash <file>",
+		Short: "Compute and print the CID of a file without storing it",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runHash,
+	}
+
+	rootCmd.AddCommand(hashCmd)
+
 	getCmd := &cobra.Command{
 		Use:   "get <cid>",
 		Short: "Retrieve a file from the blob store",
@@ -169,7 +178,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	if hashOnly {
-		fmt.Printf("%s  %s\n", cidBase32hex, args[0])
+		fmt.Printf("added %s %s\n", cidBase32hex, args[0])
 		return nil
 	}
 
@@ -206,6 +215,28 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Added: %s\n", cidBase32hex)
+	return nil
+}
+
+func runHash(cmd *cobra.Command, args []string) error {
+	filePath := args[0]
+
+	isJSON, err := isJSONFile(filePath)
+	if err != nil {
+		return err
+	}
+
+	hash, err := computeHash(filePath)
+	if err != nil {
+		return err
+	}
+
+	cidBase32hex, err := computeCID(hash, isJSON)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("%s  %s\n", cidBase32hex, filePath)
 	return nil
 }
 
