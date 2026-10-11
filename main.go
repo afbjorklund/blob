@@ -74,45 +74,36 @@ func isJSON(data []byte) bool {
 	return data[0] == '{' || data[0] == '['
 }
 
-func isJSONFile(filePath string) (bool, error) {
+func computeCID(filePath string) (string, []byte, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return false, err
-	}
-	defer file.Close()
-
-	buf := make([]byte, 1)
-	_, err = file.Read(buf)
-	if err != nil {
-		return false, err
-	}
-
-	return isJSON(buf), nil
-}
-
-func runHash(cmd *cobra.Command, args []string) error {
-	file, err := os.Open(args[0])
-	if err != nil {
-		return err
+		return "", nil, err
 	}
 	defer file.Close()
 
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
-		return err
+		return "", nil, err
 	}
 
 	digest := hash.Sum(nil)
 
 	mh, err := multihash.Encode(digest, multihash.SHA2_256)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 
-	isJSON, err := isJSONFile(args[0])
+	_, err = file.Seek(0, io.SeekStart)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
+	buf := make([]byte, 1)
+	_, err = file.Read(buf)
+	if err != nil {
+		return "", nil, err
+	}
+
+	isJSON := isJSON(buf)
 
 	codec := uint64(cid.Raw)
 	if isJSON {
@@ -123,9 +114,17 @@ func runHash(cmd *cobra.Command, args []string) error {
 
 	cidBase32hex, err := c.StringOfBase(multibase.Base32hex)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 
+	return cidBase32hex, digest, nil
+}
+
+func runHash(cmd *cobra.Command, args []string) error {
+	cidBase32hex, _, err := computeCID(args[0])
+	if err != nil {
+		return err
+	}
 	fmt.Println(cidBase32hex)
 	return nil
 }
@@ -133,40 +132,16 @@ func runHash(cmd *cobra.Command, args []string) error {
 func runAdd(cmd *cobra.Command, args []string) error {
 	filePath := args[0]
 
+	cidBase32hex, digest, err := computeCID(filePath)
+	if err != nil {
+		return err
+	}
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-
-	isJSON, err := isJSONFile(filePath)
-	if err != nil {
-		return err
-	}
-
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return err
-	}
-
-	digest := hash.Sum(nil)
-
-	mh, err := multihash.Encode(digest, multihash.SHA2_256)
-	if err != nil {
-		return err
-	}
-
-	codec := uint64(cid.Raw)
-	if isJSON {
-		codec = jsonCodec
-	}
-
-	c := cid.NewCidV1(codec, mh)
-
-	cidBase32hex, err := c.StringOfBase(multibase.Base32hex)
-	if err != nil {
-		return err
-	}
 
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return err
