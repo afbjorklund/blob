@@ -16,6 +16,8 @@ type StorageBackend interface {
 	Put(hash []byte, size int64, r io.Reader) error
 	Get(hash []byte) (io.ReadCloser, int64, error)
 	Has(hash []byte) (bool, error)
+	Index(name, cid string) error
+	Lookup(name string) (string, error)
 	Close() error
 }
 

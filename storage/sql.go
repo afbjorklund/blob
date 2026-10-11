@@ -25,9 +25,16 @@ func NewSQLStorage(dbPath string) (*SQLStorage, error) {
 		return nil, err
 	}
 
-	createTable := "CREATE TABLE IF NOT EXISTS blobs (hash TEXT PRIMARY KEY, data BLOB NOT NULL)"
+	createBlobs := "CREATE TABLE IF NOT EXISTS blobs (hash TEXT PRIMARY KEY, data BLOB NOT NULL)"
 
-	if err := sqlitex.ExecuteTransient(db, createTable, nil); err != nil {
+	if err := sqlitex.ExecuteTransient(db, createBlobs, nil); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	createNames := "CREATE TABLE IF NOT EXISTS names (name TEXT PRIMARY KEY, cid TEXT NOT NULL)"
+
+	if err := sqlitex.ExecuteTransient(db, createNames, nil); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -114,6 +121,39 @@ func (s *SQLStorage) Has(hash []byte) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func (s *SQLStorage) Index(name, cid string) error {
+	return sqlitex.ExecuteTransient(
+		s.db,
+		"INSERT OR REPLACE INTO names (name, cid) VALUES (?, ?)",
+		&sqlitex.ExecOptions{Args: []any{name, cid}},
+	)
+}
+
+func (s *SQLStorage) Lookup(name string) (string, error) {
+	var cid string
+	found := false
+	err := sqlitex.ExecuteTransient(
+		s.db,
+		"SELECT cid FROM names WHERE name = ?",
+		&sqlitex.ExecOptions{
+			Args: []any{name},
+			ResultFunc: func(stmt *sqlite.Stmt) error {
+				found = true
+				cid = stmt.ColumnText(0)
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", errors.New("name not found")
+	}
+
+	return cid, nil
 }
 
 func (s *SQLStorage) Close() error {

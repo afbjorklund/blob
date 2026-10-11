@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multibase"
@@ -54,10 +55,30 @@ func main() {
 
 	rootCmd.AddCommand(getCmd)
 
+	lookupCmd := &cobra.Command{
+		Use:   "lookup <name>",
+		Short: "Look up the CID of a file name in the index",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runLookup,
+	}
+
+	rootCmd.AddCommand(lookupCmd)
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func supportedCodecs() map[uint64]bool {
+	return map[uint64]bool{
+		uint64(multicodec.Raw):  true,
+		uint64(multicodec.Json): true,
+	}
+}
+
+func codecName(code uint64) string {
+	return multicodec.Code(code).String()
 }
 
 func isJSON(data []byte) bool {
@@ -163,21 +184,46 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if !has {
+		stat, err := file.Stat()
+		if err != nil {
+			return err
+		}
+
+		if err := storageBackend.Put(hash, stat.Size(), file); err != nil {
+			return err
+		}
+	}
+
+	name := filepath.Base(filePath)
+	if err := storageBackend.Index(name, cidBase32hex); err != nil {
+		return err
+	}
+
 	if has {
 		fmt.Printf("File already exists in store: %s\n", cidBase32hex)
 		return nil
 	}
 
-	stat, err := file.Stat()
+	fmt.Printf("Added: %s\n", cidBase32hex)
+	return nil
+}
+
+func runLookup(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	storageBackend, err := getStorageBackend()
+	if err != nil {
+		return err
+	}
+	defer storageBackend.Close()
+
+	cid, err := storageBackend.Lookup(name)
 	if err != nil {
 		return err
 	}
 
-	if err := storageBackend.Put(hash, stat.Size(), file); err != nil {
-		return err
-	}
-
-	fmt.Printf("Added: %s\n", cidBase32hex)
+	fmt.Println(cid)
 	return nil
 }
 
@@ -185,6 +231,12 @@ func runGet(cmd *cobra.Command, args []string) error {
 	c, err := cid.Parse(args[0])
 	if err != nil {
 		return err
+	}
+
+	codec := c.Type()
+	if !supportedCodecs()[codec] {
+		return fmt.Errorf("unsupported codec %q: this store only holds %q",
+			codecName(codec), "raw and json")
 	}
 
 	if outputPath == "" {

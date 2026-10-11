@@ -92,6 +92,31 @@ func (s *DirStorage) Has(hash []byte) (bool, error) {
 	return false, err
 }
 
+func (s *DirStorage) Index(name, cid string) error {
+	indexDir := filepath.Join(s.rootDir, "index")
+	if err := os.MkdirAll(indexDir, 0755); err != nil {
+		return err
+	}
+
+	path := filepath.Join(indexDir, name)
+	tmpPath := path + ".tmp"
+
+	if err := os.WriteFile(tmpPath, []byte(cid), 0644); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpPath, path)
+}
+
+func (s *DirStorage) Lookup(name string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(s.rootDir, "index", name))
+	if err != nil {
+		return "", err
+	}
+
+	return string(data), nil
+}
+
 func (s *DirStorage) Close() error {
 	return nil
 }
