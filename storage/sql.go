@@ -11,11 +11,11 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-type SQLiteStorage struct {
+type SQLStorage struct {
 	db *sql.DB
 }
 
-func NewSQLiteStorage(dbPath string) (*SQLiteStorage, error) {
+func NewSQLStorage(dbPath string) (*SQLStorage, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, err
 	}
@@ -37,10 +37,10 @@ func NewSQLiteStorage(dbPath string) (*SQLiteStorage, error) {
 		return nil, err
 	}
 
-	return &SQLiteStorage{db: db}, nil
+	return &SQLStorage{db: db}, nil
 }
 
-func (s *SQLiteStorage) Put(digest []byte, r io.Reader) error {
+func (s *SQLStorage) Put(digest []byte, r io.Reader) error {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -50,7 +50,7 @@ func (s *SQLiteStorage) Put(digest []byte, r io.Reader) error {
 	return err
 }
 
-func (s *SQLiteStorage) Get(digest []byte) (io.ReadCloser, error) {
+func (s *SQLStorage) Get(digest []byte) (io.ReadCloser, error) {
 	var data []byte
 	err := s.db.QueryRow("SELECT data FROM blobs WHERE digest = ?", digest).Scan(&data)
 	if err == sql.ErrNoRows {
@@ -63,7 +63,7 @@ func (s *SQLiteStorage) Get(digest []byte) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
-func (s *SQLiteStorage) Has(digest []byte) (bool, error) {
+func (s *SQLStorage) Has(digest []byte) (bool, error) {
 	var count int
 	err := s.db.QueryRow("SELECT COUNT(*) FROM blobs WHERE digest = ?", digest).Scan(&count)
 	if err != nil {
@@ -72,6 +72,6 @@ func (s *SQLiteStorage) Has(digest []byte) (bool, error) {
 	return count > 0, nil
 }
 
-func (s *SQLiteStorage) Close() error {
+func (s *SQLStorage) Close() error {
 	return s.db.Close()
 }

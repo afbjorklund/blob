@@ -26,7 +26,7 @@ blob add <file>
 ```
 
 Options:
-- `--storage dir|sqlite` - Storage backend (default: `dir`)
+- `--storage dir|sql` - Storage backend (default: `dir`)
 - `--path <dir|dbfile>` - Storage location
 
 ### Get from blob store
@@ -55,10 +55,10 @@ Files are stored in `.blob-store/<prefix>/<digest>`.
 ### SQLite backend
 
 ```console
-$ blob --storage sqlite --path blobs.db add test.txt
+$ blob --storage sql --path blobs.db add test.txt
 Added: v05ah487ip8drdhv90v86rbv4d1v5f7ueeqpnsjkjmtg508mqabjcpgjfq8
 
-$ blob --storage sqlite --path blobs.db get v05ah487ip8drdhv90v86rbv4d1v5f7ueeqpnsjkjmtg508mqabjcpgjfq8 output.txt
+$ blob --storage sql --path blobs.db get v05ah487ip8drdhv90v86rbv4d1v5f7ueeqpnsjkjmtg508mqabjcpgjfq8 output.txt
 Retrieved: v05ah487ip8drdhv90v86rbv4d1v5f7ueeqpnsjkjmtg508mqabjcpgjfq8 -> output.txt
 
 $ cat output.txt

@@ -26,7 +26,7 @@ func main() {
 		Version: "0.1.0",
 	}
 
-	rootCmd.PersistentFlags().StringVarP(&storageType, "storage", "s", "dir", "storage backend (dir or sqlite)")
+	rootCmd.PersistentFlags().StringVarP(&storageType, "storage", "s", "dir", "storage backend (dir or sql)")
 	rootCmd.PersistentFlags().StringVarP(&storagePath, "path", "p", "./.blob-store", "storage path")
 
 	hashCmd := &cobra.Command{
