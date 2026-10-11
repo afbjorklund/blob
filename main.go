@@ -30,10 +30,10 @@ func main() {
 	rootCmd.PersistentFlags().StringVarP(&storagePath, "path", "p", "./.blob-store", "storage path")
 
 	hashCmd := &cobra.Command{
-		Use:     "hash [file]",
-		Short:   "Compute and print the CID hash of a file",
-		Args:    cobra.ExactArgs(1),
-		RunE:    runHash,
+		Use:   "hash [file]",
+		Short: "Compute and print the CID hash of a file",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runHash,
 	}
 
 	rootCmd.AddCommand(hashCmd)

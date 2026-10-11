@@ -8,8 +8,8 @@ import (
 type StorageType string
 
 const (
-	StorageDir     StorageType = "dir"
-	StorageSQLite  StorageType = "sqlite"
+	StorageDir    StorageType = "dir"
+	StorageSQLite StorageType = "sqlite"
 )
 
 type StorageBackend interface {
