@@ -102,10 +102,10 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer file.Close()
 
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
-		file.Close()
 		return err
 	}
 
@@ -113,7 +113,6 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 	mh, err := multihash.Encode(digest, multihash.SHA2_256)
 	if err != nil {
-		file.Close()
 		return err
 	}
 
@@ -121,11 +120,13 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 	cidBase32hex, err := c.StringOfBase(multibase.Base32hex)
 	if err != nil {
-		file.Close()
 		return err
 	}
 
-	file.Close()
+	err = file.Close()
+	if err != nil {
+		return err
+	}
 
 	storageBackend, err := getStorageBackend()
 	if err != nil {

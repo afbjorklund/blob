@@ -33,7 +33,7 @@ func NewSQLStorage(dbPath string) (*SQLStorage, error) {
 	`
 
 	if _, err := db.Exec(createTable); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 
