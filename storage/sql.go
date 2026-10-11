@@ -1,18 +1,18 @@
 package storage
 
 import (
-	"bytes"
-	"database/sql"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 
-	_ "github.com/mattn/go-sqlite3"
+	"zombiezen.com/go/sqlite"
+	"zombiezen.com/go/sqlite/sqlitex"
 )
 
 type SQLStorage struct {
-	db *sql.DB
+	dbPath string
+	db     *sqlite.Conn
 }
 
 func NewSQLStorage(dbPath string) (*SQLStorage, error) {
@@ -20,24 +20,33 @@ func NewSQLStorage(dbPath string) (*SQLStorage, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sqlite.OpenConn(dbPath, sqlite.OpenCreate|sqlite.OpenReadWrite)
 	if err != nil {
 		return nil, err
 	}
 
-	createTable := `
-	CREATE TABLE IF NOT EXISTS blobs (
-		digest TEXT PRIMARY KEY,
-		data BLOB NOT NULL
-	);
-	`
+	createTable := "CREATE TABLE IF NOT EXISTS blobs (digest TEXT PRIMARY KEY, data BLOB NOT NULL)"
 
-	if _, err := db.Exec(createTable); err != nil {
+	var errValue error
+	endFn := sqlitex.Transaction(db)
+	stmt, err := db.Prepare(createTable)
+	if err != nil {
+		errValue = err
+		endFn(&errValue)
 		_ = db.Close()
 		return nil, err
 	}
+	if _, err := stmt.Step(); err != nil {
+		errValue = err
+		endFn(&errValue)
+		stmt.Finalize()
+		_ = db.Close()
+		return nil, err
+	}
+	stmt.Finalize()
+	endFn(&errValue)
 
-	return &SQLStorage{db: db}, nil
+	return &SQLStorage{dbPath: dbPath, db: db}, nil
 }
 
 func (s *SQLStorage) Put(digest []byte, r io.Reader) error {
@@ -46,29 +55,108 @@ func (s *SQLStorage) Put(digest []byte, r io.Reader) error {
 		return err
 	}
 
-	_, err = s.db.Exec("INSERT OR REPLACE INTO blobs (digest, data) VALUES (?, ?)", digest, data)
-	return err
+	var errValue error
+	endFn := sqlitex.Transaction(s.db)
+	stmt, err := s.db.Prepare("INSERT OR REPLACE INTO blobs (digest, data) VALUES (?, ?)")
+	if err != nil {
+		errValue = err
+		endFn(&errValue)
+		return err
+	}
+	defer stmt.Finalize()
+
+	stmt.BindBytes(1, digest)
+	stmt.BindBytes(2, data)
+
+	if _, err := stmt.Step(); err != nil {
+		errValue = err
+		endFn(&errValue)
+		return err
+	}
+	endFn(&errValue)
+
+	return nil
+}
+
+func (s *SQLStorage) PutStream(digest []byte, r io.Reader) error {
+	var errValue error
+	endFn := sqlitex.Transaction(s.db)
+	stmt, err := s.db.Prepare("INSERT OR REPLACE INTO blobs (digest, data) VALUES (?, ?)")
+	if err != nil {
+		errValue = err
+		endFn(&errValue)
+		return err
+	}
+	defer stmt.Finalize()
+
+	stmt.BindBytes(1, digest)
+	stmt.BindZeroBlob(2, 0)
+
+	if _, err := stmt.Step(); err != nil {
+		errValue = err
+		endFn(&errValue)
+		return err
+	}
+	stmt.Reset()
+
+	blob, err := s.db.OpenBlob("", "blobs", "data", 1, true)
+	if err != nil {
+		errValue = err
+		endFn(&errValue)
+		return err
+	}
+	defer blob.Close()
+
+	if _, err := io.Copy(blob, r); err != nil {
+		errValue = err
+		endFn(&errValue)
+		return err
+	}
+	endFn(&errValue)
+
+	return nil
 }
 
 func (s *SQLStorage) Get(digest []byte) (io.ReadCloser, error) {
-	var data []byte
-	err := s.db.QueryRow("SELECT data FROM blobs WHERE digest = ?", digest).Scan(&data)
-	if err == sql.ErrNoRows {
-		return nil, errors.New("blob not found")
+	stmt, err := s.db.Prepare("SELECT rowid FROM blobs WHERE digest = ?")
+	if err != nil {
+		return nil, err
 	}
+	defer stmt.Finalize()
+
+	stmt.BindBytes(1, digest)
+
+	if _, err := stmt.Step(); err != nil {
+		if sqlite.ErrCode(err) == sqlite.ResultNotFound {
+			return nil, errors.New("blob not found")
+		}
+		return nil, err
+	}
+
+	rowid := stmt.ColumnInt64(0)
+
+	blob, err := s.db.OpenBlob("", "blobs", "data", rowid, false)
 	if err != nil {
 		return nil, err
 	}
 
-	return io.NopCloser(bytes.NewReader(data)), nil
+	return blob, nil
 }
 
 func (s *SQLStorage) Has(digest []byte) (bool, error) {
-	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM blobs WHERE digest = ?", digest).Scan(&count)
+	stmt, err := s.db.Prepare("SELECT COUNT(*) FROM blobs WHERE digest = ?")
 	if err != nil {
 		return false, err
 	}
+	defer stmt.Finalize()
+
+	stmt.BindBytes(1, digest)
+
+	if _, err := stmt.Step(); err != nil {
+		return false, err
+	}
+
+	count := stmt.ColumnInt(0)
 	return count > 0, nil
 }
 
