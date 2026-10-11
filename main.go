@@ -148,7 +148,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	if hashOnly {
-		fmt.Println(cidBase32hex)
+		fmt.Printf("%s  %s\n", cidBase32hex, args[0])
 		return nil
 	}
 
