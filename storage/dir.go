@@ -28,7 +28,10 @@ func (s *DirStorage) Put(digest []byte, r io.Reader) error {
 		return err
 	}
 
-	path := filepath.Join(dir, hexDigest)
+	rest := hexDigest[2:]
+	filename := prefix + "-" + rest
+
+	path := filepath.Join(dir, filename)
 	tmpPath := path + ".tmp"
 
 	f, err := os.Create(tmpPath)
@@ -52,9 +55,10 @@ func (s *DirStorage) Put(digest []byte, r io.Reader) error {
 func (s *DirStorage) Get(digest []byte) (io.ReadCloser, error) {
 	hexDigest := fmt.Sprintf("%x", digest)
 	prefix := hexDigest[:2]
+	rest := hexDigest[2:]
 
-	dir := filepath.Join(s.rootDir, prefix)
-	path := filepath.Join(dir, hexDigest)
+	filename := prefix + "-" + rest
+	path := filepath.Join(s.rootDir, prefix, filename)
 
 	return os.Open(path)
 }
@@ -62,9 +66,10 @@ func (s *DirStorage) Get(digest []byte) (io.ReadCloser, error) {
 func (s *DirStorage) Has(digest []byte) (bool, error) {
 	hexDigest := fmt.Sprintf("%x", digest)
 	prefix := hexDigest[:2]
+	rest := hexDigest[2:]
 
-	dir := filepath.Join(s.rootDir, prefix)
-	path := filepath.Join(dir, hexDigest)
+	filename := prefix + "-" + rest
+	path := filepath.Join(s.rootDir, prefix, filename)
 
 	_, err := os.Stat(path)
 	if err == nil {
