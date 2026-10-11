@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/ipfs/go-cid v0.6.2
 	github.com/multiformats/go-multibase v0.3.0
+	github.com/multiformats/go-multicodec v0.10.0
 	github.com/multiformats/go-multihash v0.2.3
 	github.com/spf13/cobra v1.10.2
 	zombiezen.com/go/sqlite v1.4.2

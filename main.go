@@ -8,6 +8,7 @@ import (
 
 	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multibase"
+	"github.com/multiformats/go-multicodec"
 	"github.com/multiformats/go-multihash"
 	"github.com/spf13/cobra"
 
@@ -65,8 +66,6 @@ func main() {
 	}
 }
 
-const jsonCodec = 0x0200
-
 func isJSON(data []byte) bool {
 	if len(data) == 0 {
 		return false
@@ -112,19 +111,19 @@ func computeCID(digest []byte, isJSON bool) (string, error) {
 		return "", err
 	}
 
-	codec := uint64(cid.Raw)
+	codec := multicodec.Raw
 	if isJSON {
-		codec = jsonCodec
+		codec = multicodec.Json
 	}
 
-	c := cid.NewCidV1(codec, mh)
+	c := cid.NewCidV1(uint64(codec), mh)
 
-	cidBase32hex, err := c.StringOfBase(multibase.Base32hex)
+	s, err := c.StringOfBase(multibase.Base32hex)
 	if err != nil {
 		return "", err
 	}
 
-	return cidBase32hex, nil
+	return s, nil
 }
 
 func runHash(cmd *cobra.Command, args []string) error {
