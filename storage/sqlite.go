@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"database/sql"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -47,13 +46,13 @@ func (s *SQLiteStorage) Put(digest []byte, r io.Reader) error {
 		return err
 	}
 
-	_, err = s.db.Exec("INSERT OR REPLACE INTO blobs (digest, data) VALUES (?, ?)", fmt.Sprintf("%x", digest), data)
+	_, err = s.db.Exec("INSERT OR REPLACE INTO blobs (digest, data) VALUES (?, ?)", digest, data)
 	return err
 }
 
 func (s *SQLiteStorage) Get(digest []byte) (io.ReadCloser, error) {
 	var data []byte
-	err := s.db.QueryRow("SELECT data FROM blobs WHERE digest = ?", fmt.Sprintf("%x", digest)).Scan(&data)
+	err := s.db.QueryRow("SELECT data FROM blobs WHERE digest = ?", digest).Scan(&data)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("blob not found")
 	}
@@ -66,7 +65,7 @@ func (s *SQLiteStorage) Get(digest []byte) (io.ReadCloser, error) {
 
 func (s *SQLiteStorage) Has(digest []byte) (bool, error) {
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM blobs WHERE digest = ?", fmt.Sprintf("%x", digest)).Scan(&count)
+	err := s.db.QueryRow("SELECT COUNT(*) FROM blobs WHERE digest = ?", digest).Scan(&count)
 	if err != nil {
 		return false, err
 	}
