@@ -90,21 +90,23 @@ func computeHash(filePath string) ([]byte, error) {
 	return digest, nil
 }
 
-func computeCID(digest []byte, filePath string) (string, error) {
+func isJSONFile(filePath string) (bool, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return "", err
+		return false, err
 	}
 	defer file.Close()
 
 	buf := make([]byte, 1)
 	_, err = file.Read(buf)
 	if err != nil {
-		return "", err
+		return false, err
 	}
 
-	isJSON := isJSON(buf)
+	return isJSON(buf), nil
+}
 
+func computeCID(digest []byte, isJSON bool) (string, error) {
 	mh, err := multihash.Encode(digest, multihash.SHA2_256)
 	if err != nil {
 		return "", err
@@ -126,11 +128,15 @@ func computeCID(digest []byte, filePath string) (string, error) {
 }
 
 func runHash(cmd *cobra.Command, args []string) error {
+	isJSON, err := isJSONFile(args[0])
+	if err != nil {
+		return err
+	}
 	digest, err := computeHash(args[0])
 	if err != nil {
 		return err
 	}
-	cidBase32hex, err := computeCID(digest, args[0])
+	cidBase32hex, err := computeCID(digest, isJSON)
 	if err != nil {
 		return err
 	}
@@ -140,11 +146,6 @@ func runHash(cmd *cobra.Command, args []string) error {
 
 func runAdd(cmd *cobra.Command, args []string) error {
 	filePath := args[0]
-
-	digest, err := computeHash(filePath)
-	if err != nil {
-		return err
-	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -156,7 +157,17 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	cidBase32hex, err := computeCID(digest, filePath)
+	isJSON, err := isJSONFile(filePath)
+	if err != nil {
+		return err
+	}
+
+	digest, err := computeHash(filePath)
+	if err != nil {
+		return err
+	}
+
+	cidBase32hex, err := computeCID(digest, isJSON)
 	if err != nil {
 		return err
 	}
