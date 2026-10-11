@@ -65,6 +65,31 @@ func main() {
 	}
 }
 
+const jsonCodec = 0x0200
+
+func isJSON(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	return data[0] == '{' || data[0] == '['
+}
+
+func isJSONFile(filePath string) (bool, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+
+	buf := make([]byte, 1)
+	_, err = file.Read(buf)
+	if err != nil {
+		return false, err
+	}
+
+	return isJSON(buf), nil
+}
+
 func runHash(cmd *cobra.Command, args []string) error {
 	file, err := os.Open(args[0])
 	if err != nil {
@@ -84,7 +109,17 @@ func runHash(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	c := cid.NewCidV1(cid.Raw, mh)
+	isJSON, err := isJSONFile(args[0])
+	if err != nil {
+		return err
+	}
+
+	codec := uint64(cid.Raw)
+	if isJSON {
+		codec = jsonCodec
+	}
+
+	c := cid.NewCidV1(codec, mh)
 
 	cidBase32hex, err := c.StringOfBase(multibase.Base32hex)
 	if err != nil {
@@ -104,6 +139,11 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 	defer file.Close()
 
+	isJSON, err := isJSONFile(filePath)
+	if err != nil {
+		return err
+	}
+
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
 		return err
@@ -116,7 +156,12 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	c := cid.NewCidV1(cid.Raw, mh)
+	codec := uint64(cid.Raw)
+	if isJSON {
+		codec = jsonCodec
+	}
+
+	c := cid.NewCidV1(codec, mh)
 
 	cidBase32hex, err := c.StringOfBase(multibase.Base32hex)
 	if err != nil {
@@ -124,11 +169,6 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-
-	err = file.Close()
-	if err != nil {
 		return err
 	}
 
@@ -146,12 +186,6 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		fmt.Printf("File already exists in store: %s\n", cidBase32hex)
 		return nil
 	}
-
-	file, err = os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
 
 	stat, err := file.Stat()
 	if err != nil {
