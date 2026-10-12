@@ -1,2 +1,4 @@
 blob
 .blob-store
+*.sif
+*.tgz
