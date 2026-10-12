@@ -86,6 +86,15 @@ func main() {
 
 	rootCmd.AddCommand(getCmd)
 
+	lookupCmd := &cobra.Command{
+		Use:   "lookup <name>",
+		Short: "Look up the CID of a stored blob by its index name",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runLookup,
+	}
+
+	rootCmd.AddCommand(lookupCmd)
+
 	serveCmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Serve the blob store over HTTP (read-only gateway)",
@@ -134,27 +143,66 @@ func computeHash(filePath string) (multihash.Multihash, error) {
 	return mh, nil
 }
 
-// detectCodec picks the content-based codec (DESIGN.md) from the file's
-// first byte: Json if it is '{' or '[', otherwise Raw (including for an
-// empty file).
+// codecForFirstByte picks the content-based codec (DESIGN.md) from the
+// blob's first byte: Json if it is '{' or '[', otherwise Raw. An empty
+// blob (first byte 0) is Raw — we do not expect one, but this is the
+// guard that keeps us from crashing on it.
+func codecForFirstByte(first byte) multicodec.Code {
+	if first == '{' || first == '[' {
+		return multicodec.Json
+	}
+	return multicodec.Raw
+}
+
+// detectCodec derives the codec a file would be stored under by peeking
+// its first byte.
 func detectCodec(filePath string) (multicodec.Code, error) {
-	file, err := os.Open(filePath)
+	f, err := os.Open(filePath)
 	if err != nil {
 		return 0, err
 	}
-	defer file.Close()
+	defer f.Close()
 
 	buf := make([]byte, 1)
-	n, err := file.Read(buf)
+	n, err := f.Read(buf)
 	if err != nil && err != io.EOF {
 		return 0, err
 	}
 
-	// Json for a leading '{' or '['; otherwise (or empty) Raw.
-	if n > 0 && (buf[0] == '{' || buf[0] == '[') {
-		return multicodec.Json, nil
+	if n == 0 {
+		return multicodec.Raw, nil
 	}
-	return multicodec.Raw, nil
+	return codecForFirstByte(buf[0]), nil
+}
+
+// peekFirstByte returns the blob's first byte (0 when empty) without
+// reading the rest.
+func peekFirstByte(backend storage.StorageBackend, digest storage.Digest) (byte, error) {
+	b, err := backend.Peek(digest, 1)
+	if err != nil {
+		return 0, err
+	}
+	if len(b) == 0 {
+		return 0, nil
+	}
+	return b[0], nil
+}
+
+// cidForDigest derives the CID of a *stored* blob from its digest
+// (multihash) by peeking the first byte and applying the same
+// content-based codec rule as `add`/`hash`, then composing the CID
+// (version + codec + multihash). It reads only that single byte, so it
+// is constant work regardless of blob size and never re-hashes — a name
+// resolves to the exact CID that `add` printed.
+func cidForDigest(backend storage.StorageBackend, digest storage.Digest) (cid.Cid, error) {
+	first, err := peekFirstByte(backend, digest)
+	if err != nil {
+		return cid.Undef, err
+	}
+
+	mc := codecForFirstByte(first)
+	mh := multihash.Multihash(digest)
+	return cid.NewCidV1(uint64(mc), mh), nil
 }
 
 // computeCID builds a CIDv1 from a multihash and a codec.
@@ -344,6 +392,34 @@ func runGet(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runLookup(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	backend, err := getStorageBackend()
+	if err != nil {
+		return err
+	}
+	defer backend.Close()
+
+	digest, err := backend.Lookup(name)
+	if err != nil {
+		return fmt.Errorf("%q: name not found in index", name)
+	}
+
+	c, err := cidForDigest(backend, digest)
+	if err != nil {
+		return err
+	}
+
+	cidStr, err := stringFromCID(c)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(cidStr)
+	return nil
+}
+
 func getStorageBackend() (storage.StorageBackend, error) {
 	return storage.NewStorage(storage.StorageType(storageType), storagePath)
 }
@@ -355,6 +431,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/blob/", func(w http.ResponseWriter, r *http.Request) {
 		serveBlob(w, r, r.URL.Path[len("/blob/"):])
+	})
+	mux.HandleFunc("/name/", func(w http.ResponseWriter, r *http.Request) {
+		serveName(w, r, r.URL.Path[len("/name/"):])
 	})
 
 	srv := &http.Server{Addr: listenAddr, Handler: mux}
@@ -441,4 +520,40 @@ func serveBlob(w http.ResponseWriter, r *http.Request, ref string) {
 	if _, err := io.Copy(w, reader); err != nil {
 		return
 	}
+}
+
+// serveName resolves an index name to its blob, derives the blob's CID
+// by peeking the first byte (the same content-based codec rule as
+// `add`/`hash`), and issues a 302 redirect to /blob/<CID>. The redirect
+// is the name→blob pointer (mirroring the dir backend's symlink for the
+// same role) and leaves all streaming / header work to /blob/<CID>.
+// 302 (not 301): the name→CID mapping is mutable (last add wins), so it
+// must not be cached.
+func serveName(w http.ResponseWriter, r *http.Request, name string) {
+	backend, err := getStorageBackend()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer backend.Close()
+
+	digest, err := backend.Lookup(name)
+	if err != nil {
+		http.Error(w, "name not found: "+name, http.StatusNotFound)
+		return
+	}
+
+	c, err := cidForDigest(backend, digest)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	cidStr, err := stringFromCID(c)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/blob/"+cidStr, http.StatusFound)
 }

@@ -179,6 +179,24 @@ func (s *DirStorage) Lookup(name string) (Digest, error) {
 	return digest, nil
 }
 
+// Peek returns the first n bytes of a blob by opening it and reading at
+// most n, without reading the rest (fewer if the blob is shorter than n
+// or empty). Bounded by n regardless of blob size.
+func (s *DirStorage) Peek(hash Digest, n int) ([]byte, error) {
+	f, err := os.Open(filepath.Join(s.rootDir, s.relPath(hash)))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	buf := make([]byte, n)
+	got, err := f.Read(buf)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return buf[:got], nil
+}
+
 func (s *DirStorage) Close() error {
 	return nil
 }

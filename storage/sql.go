@@ -153,10 +153,52 @@ func (s *SQLStorage) Lookup(name string) (Digest, error) {
 		return nil, err
 	}
 	if !found {
-		return nil, errors.New("name not found")
+		return nil, err
 	}
 
 	return hash, nil
+}
+
+// Peek returns the first n bytes of a blob, without reading the rest
+// (fewer if the blob is shorter than n or empty). It opens the row's
+// data blob (read-only) the same way Get does — via the SQLite blob
+// handle — and copies at most n bytes from the head, so the work is
+// bounded by n regardless of blob size and the blob is never
+// materialized.
+func (s *SQLStorage) Peek(hash Digest, n int) ([]byte, error) {
+	var rowid int64
+	found := false
+	err := sqlitex.ExecuteTransient(
+		s.db,
+		"SELECT rowid FROM blobs WHERE hash = ?",
+		&sqlitex.ExecOptions{
+			Args: []any{hash},
+			ResultFunc: func(stmt *sqlite.Stmt) error {
+				found = true
+				rowid = stmt.ColumnInt64(0)
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, errors.New("blob not found")
+	}
+
+	blob, err := s.db.OpenBlob("", "blobs", "data", rowid, false)
+	if err != nil {
+		return nil, err
+	}
+	defer blob.Close()
+
+	buf := make([]byte, n)
+	got, err := blob.Read(buf)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return buf[:got], nil
 }
 
 func (s *SQLStorage) Close() error {

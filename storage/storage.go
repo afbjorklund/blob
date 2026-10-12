@@ -25,6 +25,13 @@ type StorageBackend interface {
 	Has(hash Digest) (bool, error)
 	Index(name string, hash Digest) error
 	Lookup(name string) (Digest, error)
+	// Peek returns up to n leading bytes of the blob identified by digest,
+	// without reading the rest (fewer than n, possibly 0, if the blob is
+	// shorter than n / empty). It backs the content-based codec derivation
+	// (Json vs Raw) for a known digest, e.g. `lookup` name→CID and the
+	// `/name` gateway. It reads at most n bytes, so it is bounded work
+	// regardless of blob size and never materializes the blob.
+	Peek(hash Digest, n int) ([]byte, error)
 	Close() error
 }
 
