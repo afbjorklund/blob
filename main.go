@@ -276,7 +276,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 	digest := storage.Digest(c.Hash())
 
-	backend, err := getStorageBackend()
+	backend, err := getStorageBackend(storage.ReadWrite)
 	if err != nil {
 		return err
 	}
@@ -343,7 +343,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 
 	var digest storage.Digest
 	if c, err := cid.Parse(arg); err != nil {
-		backend, berr := getStorageBackend()
+		backend, berr := getStorageBackend(storage.ReadOnly)
 		if berr != nil {
 			return berr
 		}
@@ -366,7 +366,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 		outputPath = arg
 	}
 
-	backend, err := getStorageBackend()
+	backend, err := getStorageBackend(storage.ReadOnly)
 	if err != nil {
 		return err
 	}
@@ -395,7 +395,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 func runLookup(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
-	backend, err := getStorageBackend()
+	backend, err := getStorageBackend(storage.ReadOnly)
 	if err != nil {
 		return err
 	}
@@ -420,20 +420,42 @@ func runLookup(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func getStorageBackend() (storage.StorageBackend, error) {
-	return storage.NewStorage(storage.StorageType(storageType), storagePath)
+// getStorageBackend opens a backend in the requested mode and returns it for
+// single use (the caller must Close). mode distinguishes the CLI write path
+// (add, which needs to write) from the read path (get / lookup, which only
+// reads and so should not create or mutate the store).
+func getStorageBackend(mode storage.Mode) (storage.StorageBackend, error) {
+	return storage.NewStorage(storage.StorageType(storageType), storagePath, mode)
 }
 
 // runServe starts a read-only HTTP gateway for the store, so a stable
 // scheme like blob://<CID> can be mapped to
 // http://<listen>/blob/<CID> without the client knowing the backend.
+//
+// The backend is opened once, read-only, and shared across the whole server.
+// A read-only store has nothing to write, so it is the natural fit for a
+// shared handle, and the sql backend is backed by a connection pool — hence
+// safe to hand to every request goroutine — while the dir backend needs no
+// locking at all. Opening a fresh backend per request would instead pay the
+// (expensive, and on sql, file-descriptor-and-pool) open cost on every
+// request for no benefit; the old per-request design was the fallback taken
+// only because a single connection could not be shared, which the pool
+// removes. A read-only open also means the server cannot create the store or
+// accidentally mutate it (a missing store is a clear error, not a side
+// effect), the same reason the dir backend honors the read-only mode.
 func runServe(cmd *cobra.Command, args []string) error {
+	backend, err := getStorageBackend(storage.ReadOnly)
+	if err != nil {
+		return err
+	}
+	defer backend.Close()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/blob/", func(w http.ResponseWriter, r *http.Request) {
-		serveBlob(w, r, r.URL.Path[len("/blob/"):])
+		serveBlob(w, r, backend, r.URL.Path[len("/blob/"):])
 	})
 	mux.HandleFunc("/name/", func(w http.ResponseWriter, r *http.Request) {
-		serveName(w, r, r.URL.Path[len("/name/"):])
+		serveName(w, r, backend, r.URL.Path[len("/name/"):])
 	})
 
 	srv := &http.Server{Addr: listenAddr, Handler: mux}
@@ -467,20 +489,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 // digest, → Content-Digest) — both already known at request time, so no
 // content is read for the headers. The body is streamed; the blob is
 // never read into memory.
-func serveBlob(w http.ResponseWriter, r *http.Request, ref string) {
-	// Each request gets its own backend (open + defer Close), matching the
-	// per-call pattern in runGet/runAdd. The sqlite *Conn is not safe for
-	// concurrent use, so serve must not share one connection across
-	// goroutines; SQLite allows many concurrent readers, each on its own
-	// connection. (A zombiezen ConnPool would let this share one pooled
-	// handle safely — see follow-up notes in DESIGN.md.)
-	backend, err := getStorageBackend()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer backend.Close()
-
+//
+// backend is the server's shared read-only backend (opened once in
+// runServe). It is safe to call Get on it from many goroutines
+// concurrently: the sql backend pools its connections and holds each
+// connection for the duration of the read, the dir backend opens a fresh
+// file handle per call.
+func serveBlob(w http.ResponseWriter, r *http.Request, backend storage.StorageBackend, ref string) {
 	c, err := cid.Parse(ref)
 	if err != nil {
 		http.Error(w, "invalid CID: "+ref, http.StatusBadRequest)
@@ -529,14 +544,7 @@ func serveBlob(w http.ResponseWriter, r *http.Request, ref string) {
 // same role) and leaves all streaming / header work to /blob/<CID>.
 // 302 (not 301): the name→CID mapping is mutable (last add wins), so it
 // must not be cached.
-func serveName(w http.ResponseWriter, r *http.Request, name string) {
-	backend, err := getStorageBackend()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer backend.Close()
-
+func serveName(w http.ResponseWriter, r *http.Request, backend storage.StorageBackend, name string) {
 	digest, err := backend.Lookup(name)
 	if err != nil {
 		http.Error(w, "name not found: "+name, http.StatusNotFound)

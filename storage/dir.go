@@ -11,15 +11,25 @@ import (
 )
 
 type DirStorage struct {
-	rootDir string
+	rootDir  string
+	readOnly bool
 }
 
-func NewDirStorage(rootDir string) (*DirStorage, error) {
-	if err := os.MkdirAll(rootDir, 0755); err != nil {
-		return nil, err
+func NewDirStorage(rootDir string, mode Mode) (*DirStorage, error) {
+	readOnly := mode != ReadWrite
+
+	// A read-only backend must not create the store (a missing store is a
+	// legitimate "not found", not an error to mask by opening for write).
+	// A read-write backend creates the store directory as needed (the index
+	// directory is still created lazily by Index, which is the only method
+	// that needs it).
+	if !readOnly {
+		if err := os.MkdirAll(rootDir, 0755); err != nil {
+			return nil, err
+		}
 	}
 
-	return &DirStorage{rootDir: rootDir}, nil
+	return &DirStorage{rootDir: rootDir, readOnly: readOnly}, nil
 }
 
 // fanoutDepth is how many leading key bytes the dir backend uses as one
@@ -49,6 +59,9 @@ func (s *DirStorage) relPath(hash Digest) string {
 }
 
 func (s *DirStorage) Put(hash Digest, size int64, r io.Reader) error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
 	dst := path.Join(s.rootDir, s.relPath(hash))
 
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
@@ -106,6 +119,9 @@ func (s *DirStorage) Has(hash Digest) (bool, error) {
 // content. The relative target is "../" + relPath, one "../" hop back to
 // the store root regardless of the fanout depth.
 func (s *DirStorage) Index(name string, hash Digest) error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
 	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, os.PathSeparator) {
 		return fmt.Errorf("invalid index name %q", name)
 	}

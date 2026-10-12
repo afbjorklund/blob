@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"io"
 
@@ -8,45 +9,162 @@ import (
 	"zombiezen.com/go/sqlite/sqlitex"
 )
 
-// SQLStorage stores a multihash-keyed CAS in SQLite. The `hash` column
-// holds the multihash bytes (algorithm + digest) opaquely; no
-// multiformats decoding happens here.
+// SQLStorage stores a multihash-keyed CAS in SQLite. The `hash` column holds
+// the multihash bytes (algorithm + digest) opaquely; no multiformats decoding
+// happens here.
+//
+// A SQLStorage is always backed by a pool of SQLite connections
+// ([sqlitex.Pool]). A single *sqlite.Conn is not safe for concurrent use, but
+// a pool hands out one connection at a time safely ([Pool.Take] / [Pool.Put]),
+// which is exactly what lets the shared read-only gateway serve many requests
+// at once and what makes concurrent readers/writers of the CLI safe: each
+// operation takes a connection, does only the work it needs (a few statements
+// or one streamed blob read), and puts it back.
+//
+// For a read-write store the pool is opened in WAL mode (OpenWAL), so
+// concurrent readers on their own pool connections are not blocked while a
+// writer is committing. That is the concurrency story: many readers via the
+// pool, and read/write overlap via WAL.
 type SQLStorage struct {
-	db *sqlite.Conn
+	// pool hands out connections for the lifetime of the backend. It is
+	// closed (interrupting in-flight reads and unblocking any waiting Take)
+	// by Close.
+	pool *sqlitex.Pool
+
+	// readOnly is true when the pool was opened read-only. It is also the
+	// defensive check the write path (Put / Index) uses to refuse work rather
+	// than depending on the open flag alone.
+	readOnly bool
+
+	closed bool
 }
 
-func NewSQLStorage(dbPath string) (*SQLStorage, error) {
-	db, err := sqlite.OpenConn(dbPath, sqlite.OpenCreate|sqlite.OpenReadWrite)
+// poolSize is the number of pooled connections per open backend. Ten is the
+// sqlitex default and matches the gateway's model — many concurrent readers.
+// It is deliberately fixed rather than scaled to a machine: this is a local
+// store, not a database to be sized up.
+const poolSize = 10
+
+// initQueries are the per-store DDL statements, executed on a fresh
+// read-write open so a brand-new store becomes usable without a separate
+// migration step. A read-only open never runs these: it requires an already
+// initialized store (an existing database file).
+var initQueries = []string{
+	"CREATE TABLE IF NOT EXISTS blobs (hash BLOB PRIMARY KEY, data BLOB NOT NULL)",
+	"CREATE TABLE IF NOT EXISTS names (name TEXT PRIMARY KEY, hash BLOB NOT NULL REFERENCES blobs(hash))",
+}
+
+// prepareConn is the pool's per-connection setup, invoked once for each pooled
+// connection on its first checkout: enable foreign keys (enforcing the
+// names→blobs reference), then create the schema on a writable store. It is
+// safe for concurrent use (the pool may call it from several goroutines at
+// startup) because it is stateless and each call takes its own connection.
+func prepareConn(readOnly bool) func(conn *sqlite.Conn) error {
+	return func(conn *sqlite.Conn) error {
+		if err := sqlitex.ExecuteTransient(conn, "PRAGMA foreign_keys = ON", nil); err != nil {
+			return err
+		}
+		if readOnly {
+			return nil
+		}
+		for _, q := range initQueries {
+			if err := sqlitex.ExecuteTransient(conn, q, nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+func NewSQLStorage(dbPath string, mode Mode) (*SQLStorage, error) {
+	var (
+		flags    sqlite.OpenFlags
+		readOnly bool
+	)
+	if mode == ReadWrite {
+		// OpenReadWrite|OpenCreate so a new store can be created, and OpenWAL
+		// so a later writer does not hold readers out (read/write overlap).
+		flags = sqlite.OpenReadWrite | sqlite.OpenCreate | sqlite.OpenWAL
+	} else {
+		readOnly = true
+		flags = sqlite.OpenReadOnly
+	}
+
+	pool, err := sqlitex.NewPool(dbPath, sqlitex.PoolOptions{
+		Flags: flags,
+		// PrepareConn runs once per pooled connection on first use; it doubles
+		// as the schema bootstrap for a brand-new read-write store.
+		PrepareConn: prepareConn(readOnly),
+		PoolSize:    poolSize,
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	if err := sqlitex.ExecuteTransient(db, "PRAGMA foreign_keys = ON", nil); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
+	return &SQLStorage{pool: pool, readOnly: readOnly}, nil
+}
 
-	createBlobs := "CREATE TABLE IF NOT EXISTS blobs (hash BLOB PRIMARY KEY, data BLOB NOT NULL)"
-	if err := sqlitex.ExecuteTransient(db, createBlobs, nil); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
+// take pulls a connection from the pool for the duration of one operation.
+// It blocks until a connection is free (Take), so a burst of concurrent
+// readers is served in sequence up to the pool size rather than failing.
+func (s *SQLStorage) take(ctx context.Context) (*sqlite.Conn, error) {
+	return s.pool.Take(ctx)
+}
 
-	createNames := "CREATE TABLE IF NOT EXISTS names (name TEXT PRIMARY KEY, hash BLOB NOT NULL REFERENCES blobs(hash))"
-	if err := sqlitex.ExecuteTransient(db, createNames, nil); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
+func (s *SQLStorage) put(conn *sqlite.Conn) {
+	s.pool.Put(conn)
+}
 
-	return &SQLStorage{db: db}, nil
+// connReader is the io.ReadCloser returned by Get. A *sqlite.Blob is valid
+// only while the connection that opened it is in use, so the reader carries
+// that connection and returns it to the pool when the caller closes it (or
+// the read finishes). This is what prevents the classic "use a pooled
+// connection after it was recycled" crash: the connection stays checked out
+// for as long as the caller holds the reader.
+type connReader struct {
+	blob *sqlite.Blob
+	conn *sqlite.Conn
+	put  func(*sqlite.Conn)
+	done bool
+}
+
+func (r *connReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	return r.blob.Read(p)
+}
+
+func (r *connReader) Close() error {
+	if r.done {
+		return nil
+	}
+	r.done = true
+	// Close the blob first, then return the connection. (A read in flight can
+	// be interrupted by Close(); that is expected teardown, not corruption.)
+	err := r.blob.Close()
+	r.put(r.conn)
+	return err
 }
 
 func (s *SQLStorage) Put(hash Digest, size int64, r io.Reader) error {
-	var errValue error
-	endFn := sqlitex.Transaction(s.db)
-	defer endFn(&errValue)
+	if s.readOnly {
+		return ErrReadOnly
+	}
 
-	stmt, err := s.db.Prepare("INSERT INTO blobs (hash, data) VALUES (?, zeroblob(?))")
+	conn, err := s.take(context.Background())
+	if err != nil {
+		return err
+	}
+	defer s.put(conn)
+
+	// Insert the row with a sized-but-unsized blob (zeroblob), then stream the
+	// data into it via the SQLite blob API so the bytes are never held whole.
+	errValue := error(nil)
+	endTx := sqlitex.Transaction(conn)
+	defer endTx(&errValue)
+
+	stmt, err := conn.Prepare("INSERT INTO blobs (hash, data) VALUES (?, zeroblob(?))")
 	if err != nil {
 		return err
 	}
@@ -54,29 +172,36 @@ func (s *SQLStorage) Put(hash Digest, size int64, r io.Reader) error {
 
 	stmt.BindBytes(1, hash)
 	stmt.BindInt64(2, size)
-
 	if _, err := stmt.Step(); err != nil {
 		return err
 	}
 
-	rowid := s.db.LastInsertRowID()
-
-	blob, err := s.db.OpenBlob("", "blobs", "data", rowid, true)
+	rowid := conn.LastInsertRowID()
+	blob, err := conn.OpenBlob("", "blobs", "data", rowid, true)
 	if err != nil {
 		return err
 	}
 	defer blob.Close()
 
-	_, err = blob.ReadFrom(r)
-	return err
+	if _, err := blob.ReadFrom(r); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *SQLStorage) Get(hash Digest) (io.ReadCloser, int64, error) {
-	var rowid int64
-	var size int64
-	found := false
-	err := sqlitex.ExecuteTransient(
-		s.db,
+	conn, err := s.take(context.Background())
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var (
+		rowid int64
+		size  int64
+		found bool
+	)
+	qerr := sqlitex.ExecuteTransient(
+		conn,
 		"SELECT rowid, length(data) FROM blobs WHERE hash = ?",
 		&sqlitex.ExecOptions{
 			Args: []any{hash},
@@ -88,25 +213,34 @@ func (s *SQLStorage) Get(hash Digest) (io.ReadCloser, int64, error) {
 			},
 		},
 	)
-	if err != nil {
-		return nil, 0, err
+	if qerr != nil {
+		s.put(conn)
+		return nil, 0, qerr
 	}
 	if !found {
+		s.put(conn)
 		return nil, 0, errors.New("blob not found")
 	}
 
-	blob, err := s.db.OpenBlob("", "blobs", "data", rowid, false)
+	blob, err := conn.OpenBlob("", "blobs", "data", rowid, false)
 	if err != nil {
+		s.put(conn)
 		return nil, 0, err
 	}
 
-	return blob, size, nil
+	return &connReader{blob: blob, conn: conn, put: s.put}, size, nil
 }
 
 func (s *SQLStorage) Has(hash Digest) (bool, error) {
+	conn, err := s.take(context.Background())
+	if err != nil {
+		return false, err
+	}
+	defer s.put(conn)
+
 	var count int
-	err := sqlitex.ExecuteTransient(
-		s.db,
+	err = sqlitex.ExecuteTransient(
+		conn,
 		"SELECT COUNT(*) FROM blobs WHERE hash = ?",
 		&sqlitex.ExecOptions{
 			Args: []any{hash},
@@ -123,27 +257,42 @@ func (s *SQLStorage) Has(hash Digest) (bool, error) {
 }
 
 func (s *SQLStorage) Index(name string, hash Digest) error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
+	conn, err := s.take(context.Background())
+	if err != nil {
+		return err
+	}
+	defer s.put(conn)
+
 	return sqlitex.ExecuteTransient(
-		s.db,
+		conn,
 		"INSERT OR REPLACE INTO names (name, hash) VALUES (?, ?)",
 		&sqlitex.ExecOptions{Args: []any{name, hash}},
 	)
 }
 
 func (s *SQLStorage) Lookup(name string) (Digest, error) {
+	conn, err := s.take(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	defer s.put(conn)
+
 	var hash []byte
 	found := false
-	err := sqlitex.ExecuteTransient(
-		s.db,
+	err = sqlitex.ExecuteTransient(
+		conn,
 		"SELECT hash FROM names WHERE name = ?",
 		&sqlitex.ExecOptions{
 			Args: []any{name},
 			ResultFunc: func(stmt *sqlite.Stmt) error {
-				var err error
-				hash, err = io.ReadAll(stmt.ColumnReader(0))
-				if err != nil {
-					return err
+				h, rerr := io.ReadAll(stmt.ColumnReader(0))
+				if rerr != nil {
+					return rerr
 				}
+				hash = h
 				found = true
 				return nil
 			},
@@ -153,23 +302,28 @@ func (s *SQLStorage) Lookup(name string) (Digest, error) {
 		return nil, err
 	}
 	if !found {
-		return nil, err
+		return nil, errors.New("name not found")
 	}
 
 	return hash, nil
 }
 
-// Peek returns the first n bytes of a blob, without reading the rest
-// (fewer if the blob is shorter than n or empty). It opens the row's
-// data blob (read-only) the same way Get does — via the SQLite blob
-// handle — and copies at most n bytes from the head, so the work is
-// bounded by n regardless of blob size and the blob is never
+// Peek returns the first n bytes of a blob, without reading the rest (fewer if
+// the blob is shorter than n or empty). It opens the row's data blob
+// (read-only) the same way Get does and copies at most n bytes from the head,
+// so the work is bounded by n regardless of blob size and the blob is never
 // materialized.
 func (s *SQLStorage) Peek(hash Digest, n int) ([]byte, error) {
+	conn, err := s.take(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	defer s.put(conn)
+
 	var rowid int64
 	found := false
-	err := sqlitex.ExecuteTransient(
-		s.db,
+	qerr := sqlitex.ExecuteTransient(
+		conn,
 		"SELECT rowid FROM blobs WHERE hash = ?",
 		&sqlitex.ExecOptions{
 			Args: []any{hash},
@@ -180,14 +334,14 @@ func (s *SQLStorage) Peek(hash Digest, n int) ([]byte, error) {
 			},
 		},
 	)
-	if err != nil {
-		return nil, err
+	if qerr != nil {
+		return nil, qerr
 	}
 	if !found {
 		return nil, errors.New("blob not found")
 	}
 
-	blob, err := s.db.OpenBlob("", "blobs", "data", rowid, false)
+	blob, err := conn.OpenBlob("", "blobs", "data", rowid, false)
 	if err != nil {
 		return nil, err
 	}
@@ -202,5 +356,9 @@ func (s *SQLStorage) Peek(hash Digest, n int) ([]byte, error) {
 }
 
 func (s *SQLStorage) Close() error {
-	return s.db.Close()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return s.pool.Close()
 }
