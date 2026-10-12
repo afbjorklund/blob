@@ -274,29 +274,25 @@ func runHash(cmd *cobra.Command, args []string) error {
 func runGet(cmd *cobra.Command, args []string) error {
 	arg := args[0]
 
-	c, err := cid.Parse(arg)
-	if err != nil {
+	var digest storage.Digest
+	if c, err := cid.Parse(arg); err != nil {
 		backend, berr := getStorageBackend()
 		if berr != nil {
 			return berr
 		}
 		defer backend.Close()
 
-		hash, lerr := backend.Lookup(arg)
+		var lerr error
+		digest, lerr = backend.Lookup(arg)
 		if lerr != nil {
 			return fmt.Errorf("%q: name not found in index", arg)
 		}
-
-		if outputPath == "" {
-			outputPath = arg
+	} else {
+		var derr error
+		digest, derr = digestFromCID(c)
+		if derr != nil {
+			return derr
 		}
-
-		return writeBlob(cmd, backend, hash, arg)
-	}
-
-	digest, err := digestFromCID(c)
-	if err != nil {
-		return err
 	}
 
 	if outputPath == "" {
@@ -309,11 +305,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 	}
 	defer backend.Close()
 
-	return writeBlob(cmd, backend, digest, arg)
-}
-
-func writeBlob(cmd *cobra.Command, backend storage.StorageBackend, hash storage.Digest, label string) error {
-	reader, _, err := backend.Get(hash)
+	reader, _, err := backend.Get(digest)
 	if err != nil {
 		return err
 	}
@@ -329,7 +321,7 @@ func writeBlob(cmd *cobra.Command, backend storage.StorageBackend, hash storage.
 		return err
 	}
 
-	fmt.Printf("Retrieved: %s -> %s\n", label, outputPath)
+	fmt.Printf("Retrieved: %s -> %s\n", arg, outputPath)
 	return nil
 }
 
