@@ -13,7 +13,9 @@ The CID's codec byte is chosen from the file's content: a file whose first byte 
 
 The CAS key is the **multihash** (algorithm code + digest) as opaque `[]byte` — `storage.Digest`. The storage package has no multiformats dependency: it treats this as an opaque key and does not interpret the algorithm byte. The multihash's self-describing nature is a property of the CID, which the *user-facing* layer builds from it; the storage layer itself is algorithm-agnostic.
 
-In the current implementation the multihash wraps a `crypto/sha256` digest with the `multihash.SHA2_256` code (`main.go`'s `computeDigest` + `computeCID`). If a different algorithm were ever used, `computeDigest` in `main.go` would produce that algorithm's multihash bytes directly (no schema change in `storage/`).
+In the current implementation the multihash wraps a `crypto/sha256` digest with the `multihash.SHA2_256` code (`main.go`'s `computeHash` + `computeCID`). If a different algorithm were ever used, `computeHash` in `main.go` would produce that algorithm's multihash bytes directly (no schema change in `storage/`).
+
+**String presentation vs. storage key.** A `cid.Cid` carries version + codec + multihash — no base; the base is a render-time parameter to `StringOfBase(base)`. This store renders user-facing strings as **`base32hex`** — our choice: hex digits (`0-9a-f`) instead of `base32`'s `yzabcde…` alphabet. IPFS itself uses `base32` for CIDv1 (go-cid's `String()` default); we deliberately pick `base32hex` for this store. Each backend is free to render the key (`storage.Digest`) in its own format internally: `dir` uses hex of the bytes on the filesystem and `sql` stores the bytes raw in a BLOB. The string form (presentation) and the storage form (backend-specific key representation) are distinct concerns.
 
 ## Name index
 

@@ -102,7 +102,7 @@ func isJSON(data []byte) bool {
 	return data[0] == '{' || data[0] == '['
 }
 
-func computeDigest(filePath string) (multihash.Multihash, error) {
+func computeHash(filePath string) (multihash.Multihash, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
@@ -138,23 +138,16 @@ func isJSONFile(filePath string) (bool, error) {
 	return isJSON(buf), nil
 }
 
-func computeCID(mh multihash.Multihash, isJSON bool) (storage.Digest, string, error) {
+func computeCID(mh multihash.Multihash, isJSON bool) (cid.Cid, error) {
 	codec := multicodec.Raw
 	if isJSON {
 		codec = multicodec.Json
 	}
 
-	c := cid.NewCidV1(uint64(codec), mh)
-
-	s, err := c.StringOfBase(multibase.Base32hex)
-	if err != nil {
-		return nil, "", err
-	}
-
-	return storage.Digest(mh), s, nil
+	return cid.NewCidV1(uint64(codec), mh), nil
 }
 
-func keyFromCID(c cid.Cid) (storage.Digest, error) {
+func digestFromCID(c cid.Cid) (storage.Digest, error) {
 	if !supportedCodecs()[c.Type()] {
 		return nil, fmt.Errorf("unsupported codec %q: this store only holds %q",
 			codecName(c.Type()), "raw and json")
@@ -170,7 +163,8 @@ func keyFromCID(c cid.Cid) (storage.Digest, error) {
 		return nil, fmt.Errorf("unsupported hash algorithm: %d", decoded.Code)
 	}
 
-	// The key is the multihash itself (algorithm + digest), self-describing.
+	// The storage key is the multihash itself (algorithm + digest),
+	// self-describing.
 	return mh, nil
 }
 
@@ -192,12 +186,16 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	digest, err := computeDigest(filePath)
+	mh, err := computeHash(filePath)
 	if err != nil {
 		return err
 	}
 
-	hash, cidStr, err := computeCID(digest, isJSON)
+	cidObj, err := computeCID(mh, isJSON)
+	if err != nil {
+		return err
+	}
+	cidStr, err := cidObj.StringOfBase(multibase.Base32hex)
 	if err != nil {
 		return err
 	}
@@ -207,13 +205,15 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	storageBackend, err := getStorageBackend()
+	digest := storage.Digest(cidObj.Hash())
+
+	backend, err := getStorageBackend()
 	if err != nil {
 		return err
 	}
-	defer storageBackend.Close()
+	defer backend.Close()
 
-	has, err := storageBackend.Has(hash)
+	has, err := backend.Has(digest)
 	if err != nil {
 		return err
 	}
@@ -224,13 +224,13 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
-		if err := storageBackend.Put(hash, stat.Size(), file); err != nil {
+		if err := backend.Put(digest, stat.Size(), file); err != nil {
 			return err
 		}
 	}
 
 	name := filepath.Base(filePath)
-	if err := storageBackend.Index(name, hash); err != nil {
+	if err := backend.Index(name, digest); err != nil {
 		return err
 	}
 
@@ -251,12 +251,16 @@ func runHash(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	digest, err := computeDigest(filePath)
+	mh, err := computeHash(filePath)
 	if err != nil {
 		return err
 	}
 
-	_, cidStr, err := computeCID(digest, isJSON)
+	cidObj, err := computeCID(mh, isJSON)
+	if err != nil {
+		return err
+	}
+	cidStr, err := cidObj.StringOfBase(multibase.Base32hex)
 	if err != nil {
 		return err
 	}
@@ -288,7 +292,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 		return writeBlob(cmd, backend, hash, arg)
 	}
 
-	hash, err := keyFromCID(c)
+	digest, err := digestFromCID(c)
 	if err != nil {
 		return err
 	}
@@ -303,7 +307,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 	}
 	defer backend.Close()
 
-	return writeBlob(cmd, backend, hash, arg)
+	return writeBlob(cmd, backend, digest, arg)
 }
 
 func writeBlob(cmd *cobra.Command, backend storage.StorageBackend, hash storage.Digest, label string) error {
