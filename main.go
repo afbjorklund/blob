@@ -1,11 +1,18 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strconv"
+	"syscall"
+	"time"
 
 	"blob/storage"
 
@@ -21,6 +28,7 @@ var (
 	storagePath string
 	outputPath  string
 	hashOnly    bool
+	listenAddr  string
 )
 
 func defaultStorageType() string {
@@ -77,6 +85,17 @@ func main() {
 	getCmd.Flags().StringVarP(&outputPath, "output", "o", "", "output file path")
 
 	rootCmd.AddCommand(getCmd)
+
+	serveCmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Serve the blob store over HTTP (read-only gateway)",
+		Args:  cobra.NoArgs,
+		RunE:  runServe,
+	}
+
+	serveCmd.Flags().StringVarP(&listenAddr, "listen", "l", "127.0.0.1:8080", "address to listen on (host:port)")
+
+	rootCmd.AddCommand(serveCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -327,4 +346,99 @@ func runGet(cmd *cobra.Command, args []string) error {
 
 func getStorageBackend() (storage.StorageBackend, error) {
 	return storage.NewStorage(storage.StorageType(storageType), storagePath)
+}
+
+// runServe starts a read-only HTTP gateway for the store, so a stable
+// scheme like blob://<CID> can be mapped to
+// http://<listen>/blob/<CID> without the client knowing the backend.
+func runServe(cmd *cobra.Command, args []string) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/blob/", func(w http.ResponseWriter, r *http.Request) {
+		serveBlob(w, r, r.URL.Path[len("/blob/"):])
+	})
+
+	srv := &http.Server{Addr: listenAddr, Handler: mux}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+		}
+	}()
+
+	fmt.Printf("Serving on http://%s\n", listenAddr)
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	return srv.Shutdown(shutdownCtx)
+}
+
+// serveBlob streams a single blob to the response, identified by CID.
+// The CID carries the codec (→ Content-Type) and the multihash (→ the
+// digest, → Content-Digest) — both already known at request time, so no
+// content is read for the headers. The body is streamed; the blob is
+// never read into memory.
+func serveBlob(w http.ResponseWriter, r *http.Request, ref string) {
+	// Each request gets its own backend (open + defer Close), matching the
+	// per-call pattern in runGet/runAdd. The sqlite *Conn is not safe for
+	// concurrent use, so serve must not share one connection across
+	// goroutines; SQLite allows many concurrent readers, each on its own
+	// connection. (A zombiezen ConnPool would let this share one pooled
+	// handle safely — see follow-up notes in DESIGN.md.)
+	backend, err := getStorageBackend()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer backend.Close()
+
+	c, err := cid.Parse(ref)
+	if err != nil {
+		http.Error(w, "invalid CID: "+ref, http.StatusBadRequest)
+		return
+	}
+
+	digest, err := digestFromCID(c)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	reader, size, err := backend.Get(digest)
+	if err != nil {
+		http.Error(w, "not found: "+ref, http.StatusNotFound)
+		return
+	}
+	defer reader.Close()
+
+	decoded, err := multihash.Decode(c.Hash())
+	if err != nil {
+		http.Error(w, "invalid multihash", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Digest", "sha-256="+base64.StdEncoding.EncodeToString(decoded.Digest))
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+
+	if c.Type() == uint64(multicodec.Json) {
+		w.Header().Set("Content-Type", "application/json")
+	} else {
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
+
+	w.WriteHeader(http.StatusOK)
+
+	if _, err := io.Copy(w, reader); err != nil {
+		return
+	}
 }

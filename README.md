@@ -12,6 +12,7 @@ See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
   - Directory (`--path` dir; files sharded across up to 3 one-byte fanout levels: `<byte0>/<byte1>/<byte2>/<rest of hex>`, e.g. `12/20/...`)
   - SQLite (single database file at `--path`)
 - **Streaming I/O** - Files are streamed to and from the backend without materializing the entire blob in memory. The `sqlite` backend reads via SQLite's blob API (`db.OpenBlob` in a read-only handle) instead of loading the whole row
+- **Read-only HTTP gateway** - A built-in `blob serve` command (like the IPFS HTTP gateway, but for this local store) serves `GET /blob/<CID>`, so a stable `blob://<CID>` scheme can be mapped to `http://<host>/blob/<CID>` without the client knowing the backend or storage path. Response carries `Content-Type` (from the CID codec), `Content-Length`, and `Content-Digest: sha-256=…` (the stored multihash digest)
 - **Name index** - A separate per-name index in each backend (symlink in the dir backend, foreign-keyed table in the sql backend) lets you retrieve a blob by its original filename (e.g. `ubuntu_latest.sif` and `ubuntu_26.04.sif` both resolve to the same blob). Last add wins, so `latest`-style aliases update as new content is stored
 
 ## Usage
@@ -46,6 +47,40 @@ blob get ubuntu_latest.sif -o output.sif
 
 Options:
 - `-o <output-file>` - Output file path (defaults to the argument as filename)
+
+### HTTP gateway
+
+```bash
+blob serve [--listen/-l <host:port>]
+```
+
+Starts a read-only HTTP gateway (similar to the IPFS HTTP gateway, but for this
+local store) on the given address, default `127.0.0.1:8080`. It exposes a single
+read path:
+
+```
+GET /blob/<CID>
+```
+
+This lets a stable `blob://<CID>` scheme be mapped to `http://<host:port>/blob/<CID>`
+without the client learning about backends, storage paths, etc. The response is the
+blob bytes, streamed (never buffered whole), with these headers:
+
+- `Content-Type` — `application/json` if the CID's codec is `Json`, else `application/octet-stream`
+- `Content-Length`
+- `Content-Digest: sha-256=<base64(digest)>` — the stored multihash digest, for the client to verify against
+
+The gateway is **read-only** (no upload); `add` covers writes. `/blob/<name>` is
+deliberately not supported: a name has no CID, so there is no codec for
+`Content-Type`/`Content-Digest` — use `blob get <name>` for that.
+
+```bash
+# serve in one terminal (dir backend, default path)
+blob serve
+
+# fetch in another
+curl http://127.0.0.1:8080/blob/v060084h0p8uhcetb0l9o30ji4oa0aq7jnrrulb0ofjlteq3os2r3t7i44db0
+```
 
 ### Name index
 
