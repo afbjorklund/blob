@@ -9,7 +9,7 @@ See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
 - **Content addressing with dedup** - files are stored by their content hash (CIDv1, base32hex encoding), so identical content is stored only once, no matter how many times it is added and under which names
 - **Content-based codec** - the CID's codec byte is chosen from the content, not the extension: files starting with `{` or `[` are stored as the `Json` codec, everything else as `Raw` (see [DESIGN.md](DESIGN.md) for the rationale)
 - **Pluggable storage backends**:
-  - Directory (`--path` dir; files sharded under `<first 2 hex chars of SHA-256>/<rest of hex>`)
+  - Directory (`--path` dir; files sharded across up to 3 one-byte fanout levels: `<byte0>/<byte1>/<byte2>/<rest of hex>`, e.g. `12/20/...`)
   - SQLite (single database file at `--path`)
 - **Streaming I/O** - Files are streamed to and from the backend without materializing the entire blob in memory. The `sqlite` backend reads via SQLite's blob API (`db.OpenBlob` in a read-only handle) instead of loading the whole row
 - **Name index** - A separate per-name index in each backend (symlink in the dir backend, foreign-keyed table in the sql backend) lets you retrieve a blob by its original filename (e.g. `ubuntu_latest.sif` and `ubuntu_26.04.sif` both resolve to the same blob). Last add wins, so `latest`-style aliases update as new content is stored
@@ -74,7 +74,7 @@ $ cat output.txt
 test
 ```
 
-Files are stored in `.blob-store/<prefix of hash>/<rest of hash>` and indexed in `.blob-store/index/<basename>`.
+Files are stored in `.blob-store/<byte0>/<byte1>/<byte2>/<rest of the multihash, hex>` (fanned out by up to 3 key bytes) and indexed in `.blob-store/index/<basename>`.
 
 ### Aliasing names to the same blob
 

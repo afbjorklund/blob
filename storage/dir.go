@@ -22,14 +22,30 @@ func NewDirStorage(rootDir string) (*DirStorage, error) {
 	return &DirStorage{rootDir: rootDir}, nil
 }
 
+// fanoutDepth is how many leading key bytes the dir backend uses as one
+// directory each, spreading blobs across up to 256 per level. Three
+// gives e.g. "12/20/<byte3>/<rest>" for a sha2-256 multihash. It is a
+// property of this backend's on-disk layout, not of any particular hash
+// algorithm — the multihash bytes are treated opaquely and simply carved
+// into 1-byte levels plus a remainder.
+const fanoutDepth = 3
+
 // relPath is the in-store path of a blob, relative to the root dir:
-// "<first 2 hex chars>/<rest of hex>". The hex encoding is this
-// backend's own choice for turning the (opaque) multihash key bytes
-// into a filesystem-friendly name; it does not imply any particular
-// hash algorithm.
+// "<b0>/<b1>/<b2>/<rest>", where each <bN> is one hex-encoded key byte.
+// The hex encoding is this backend's own choice for turning the (opaque)
+// multihash key bytes into a filesystem-friendly name; it does not imply
+// any particular hash algorithm.
 func (s *DirStorage) relPath(hash Digest) string {
-	hexHash := hex.EncodeToString(hash)
-	return path.Join(hexHash[:2], hexHash[2:])
+	h := hex.EncodeToString(hash)
+
+	parts := make([]string, 0, fanoutDepth+1)
+	for i := 0; i < fanoutDepth && len(h) > 2; i++ {
+		parts = append(parts, h[:2])
+		h = h[2:]
+	}
+	parts = append(parts, h)
+
+	return path.Join(parts...)
 }
 
 func (s *DirStorage) Put(hash Digest, size int64, r io.Reader) error {
@@ -85,8 +101,10 @@ func (s *DirStorage) Has(hash Digest) (bool, error) {
 	return false, err
 }
 
-// Index stores a symlink index/<name> -> ../<prefix>/<rest> pointing at
-// the blob, so following the entry directly yields the content.
+// Index stores a symlink index/<name> -> ../<b0>/<b1>/<b2>/<rest>
+// pointing at the blob, so following the entry directly yields the
+// content. The relative target is "../" + relPath, one "../" hop back to
+// the store root regardless of the fanout depth.
 func (s *DirStorage) Index(name string, hash Digest) error {
 	if strings.ContainsRune(name, os.PathSeparator) || name == ".." {
 		return fmt.Errorf("invalid index name %q", name)
@@ -145,12 +163,15 @@ func (s *DirStorage) Lookup(name string) (Digest, error) {
 		return nil, fmt.Errorf("index entry %q points outside the store: %q", name, link)
 	}
 
-	prefix, rest, ok := strings.Cut(target, "/")
-	if !ok || !isValidLinkPart(prefix) || !isValidLinkPart(rest) {
-		return nil, fmt.Errorf("index entry %q is not a valid blob path: %q", name, link)
+	join := ""
+	for _, part := range strings.Split(target, "/") {
+		if !isValidLinkPart(part) {
+			return nil, fmt.Errorf("index entry %q is not a valid blob path: %q", name, link)
+		}
+		join += part
 	}
 
-	digest, err := hex.DecodeString(prefix + rest)
+	digest, err := hex.DecodeString(join)
 	if err != nil {
 		return nil, fmt.Errorf("index entry %q is not a valid blob path: %q", name, link)
 	}
