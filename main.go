@@ -102,19 +102,24 @@ func isJSON(data []byte) bool {
 	return data[0] == '{' || data[0] == '['
 }
 
-func computeHash(filePath string) (storage.Digest, error) {
+func computeDigest(filePath string) (multihash.Multihash, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	h := sha256.New()
+	if _, err := io.Copy(h, file); err != nil {
 		return nil, err
 	}
 
-	return hash.Sum(nil), nil
+	mh, err := multihash.Encode(h.Sum(nil), multihash.SHA2_256)
+	if err != nil {
+		return nil, err
+	}
+
+	return mh, nil
 }
 
 func isJSONFile(filePath string) (bool, error) {
@@ -133,12 +138,7 @@ func isJSONFile(filePath string) (bool, error) {
 	return isJSON(buf), nil
 }
 
-func computeCID(hash storage.Digest, isJSON bool) (string, error) {
-	mh, err := multihash.Encode(hash, multihash.SHA2_256)
-	if err != nil {
-		return "", err
-	}
-
+func computeCID(mh multihash.Multihash, isJSON bool) (storage.Digest, string, error) {
 	codec := multicodec.Raw
 	if isJSON {
 		codec = multicodec.Json
@@ -148,13 +148,13 @@ func computeCID(hash storage.Digest, isJSON bool) (string, error) {
 
 	s, err := c.StringOfBase(multibase.Base32hex)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 
-	return s, nil
+	return storage.Digest(mh), s, nil
 }
 
-func digestFromCID(c cid.Cid) (storage.Digest, error) {
+func keyFromCID(c cid.Cid) (storage.Digest, error) {
 	if !supportedCodecs()[c.Type()] {
 		return nil, fmt.Errorf("unsupported codec %q: this store only holds %q",
 			codecName(c.Type()), "raw and json")
@@ -170,7 +170,8 @@ func digestFromCID(c cid.Cid) (storage.Digest, error) {
 		return nil, fmt.Errorf("unsupported hash algorithm: %d", decoded.Code)
 	}
 
-	return decoded.Digest, nil
+	// The key is the multihash itself (algorithm + digest), self-describing.
+	return mh, nil
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
@@ -191,18 +192,18 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	hash, err := computeHash(filePath)
+	digest, err := computeDigest(filePath)
 	if err != nil {
 		return err
 	}
 
-	cidBase32hex, err := computeCID(hash, isJSON)
+	hash, cidStr, err := computeCID(digest, isJSON)
 	if err != nil {
 		return err
 	}
 
 	if hashOnly {
-		fmt.Printf("added %s %s\n", cidBase32hex, args[0])
+		fmt.Printf("added %s %s\n", cidStr, args[0])
 		return nil
 	}
 
@@ -234,11 +235,11 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	if has {
-		fmt.Printf("File already exists in store: %s\n", cidBase32hex)
+		fmt.Printf("File already exists in store: %s\n", cidStr)
 		return nil
 	}
 
-	fmt.Printf("Added: %s\n", cidBase32hex)
+	fmt.Printf("Added: %s\n", cidStr)
 	return nil
 }
 
@@ -250,17 +251,17 @@ func runHash(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	hash, err := computeHash(filePath)
+	digest, err := computeDigest(filePath)
 	if err != nil {
 		return err
 	}
 
-	cidBase32hex, err := computeCID(hash, isJSON)
+	_, cidStr, err := computeCID(digest, isJSON)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("%s  %s\n", cidBase32hex, filePath)
+	fmt.Printf("%s  %s\n", cidStr, filePath)
 	return nil
 }
 
@@ -287,7 +288,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 		return writeBlob(cmd, backend, hash, arg)
 	}
 
-	hash, err := digestFromCID(c)
+	hash, err := keyFromCID(c)
 	if err != nil {
 		return err
 	}

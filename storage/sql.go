@@ -8,6 +8,9 @@ import (
 	"zombiezen.com/go/sqlite/sqlitex"
 )
 
+// SQLStorage stores a multihash-keyed CAS in SQLite. The `hash` column
+// holds the multihash bytes (algorithm + digest) opaquely; no
+// multiformats decoding happens here.
 type SQLStorage struct {
 	db *sqlite.Conn
 }

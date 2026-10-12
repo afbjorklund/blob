@@ -12,7 +12,11 @@ const (
 	StorageSQL StorageType = "sql"
 )
 
-// Digest is the sha256 digest that keys the CAS in every backend.
+// Digest is the multihash (algorithm + digest bytes) that keys the CAS
+// in every backend. The type is plain []byte so this package has no
+// multiformats dependency; the storage layer treats it as opaque. The
+// current implementation uses SHA2-256 multihashes, but the storage
+// API itself is algorithm-agnostic.
 type Digest = []byte
 
 type StorageBackend interface {

@@ -23,7 +23,10 @@ func NewDirStorage(rootDir string) (*DirStorage, error) {
 }
 
 // relPath is the in-store path of a blob, relative to the root dir:
-// "<first 2 hex chars>/<rest of hex>".
+// "<first 2 hex chars>/<rest of hex>". The hex encoding is this
+// backend's own choice for turning the (opaque) multihash key bytes
+// into a filesystem-friendly name; it does not imply any particular
+// hash algorithm.
 func (s *DirStorage) relPath(hash Digest) string {
 	hexHash := hex.EncodeToString(hash)
 	return path.Join(hexHash[:2], hexHash[2:])
@@ -105,6 +108,32 @@ func (s *DirStorage) Index(name string, hash Digest) error {
 	return os.Rename(tmpPath, dst)
 }
 
+// isValidLinkPart reports whether a single path segment uses only
+// characters safe in a relative path: ASCII alphanumerics plus '-'
+// and '_'. This deliberately does not assume a particular key length
+// or a hex-only alphabet — the current string representation (CID
+// base32hex, and hex of the multihash bytes used on disk) is a subset
+// of this set.
+func isValidLinkPart(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'z':
+		case r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// Lookup resolves an index name to the blob key it points at. The
+// entry must stay within the store and use only safe path characters;
+// beyond that, the key's exact length and alphabet are not assumed
+// (the multihash's algorithm + digest are opaque bytes to this backend).
 func (s *DirStorage) Lookup(name string) (Digest, error) {
 	link, err := os.Readlink(filepath.Join(s.rootDir, "index", name))
 	if err != nil {
@@ -117,7 +146,7 @@ func (s *DirStorage) Lookup(name string) (Digest, error) {
 	}
 
 	prefix, rest, ok := strings.Cut(target, "/")
-	if !ok || len(prefix) != 2 || len(rest) != 2*32-2 {
+	if !ok || !isValidLinkPart(prefix) || !isValidLinkPart(rest) {
 		return nil, fmt.Errorf("index entry %q is not a valid blob path: %q", name, link)
 	}
 
