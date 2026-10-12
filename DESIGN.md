@@ -4,7 +4,7 @@ Rationale for the choices in this store. Usage: README.md. Implementation detail
 
 ## Content-based codec, not extension-based
 
-The CID's codec byte is chosen from the file's content: a file whose first byte is `{` or `[` is stored with the `Json` codec, everything else with `Raw` (`isJSON` in main.go).
+The CID's codec byte is chosen from the file's content: a file whose first byte is `{` or `[` is stored with the `Json` codec, everything else with `Raw` (`detectCodec` in main.go).
 
 - This distinguishes JSON OCI manifests/configs (`Json`) from binary OCI artifacts/layers such as tarballs and SIFs (`Raw`) without a separate object-type metadata store.
 - CIDv1 carries the codec (a single multicodec byte) alongside the multihash, so the type travels with the address — no object-type or size column (which is what Git objects need); the CAS stays a pure bytes→bytes mapping.
@@ -23,7 +23,7 @@ The name index is separate from the CAS and stores the blob **key** (the multiha
 
 - Key is the file basename, expected to be a human-readable name (`ubuntu.sif`), *not* a CID — which is what keeps `get`'s CID-first resolution unambiguous.
 - Two names can map to one key, and **last add wins**, so `latest`-style aliases (e.g. `ubuntu_latest.sif` re-added as new content arrives) stay current.
-- The multihash is the key only; the CID (codec + multibase) is *derived*, not stored. If a `lookup`/name→CID command is ever re-added it is **constant time regardless of blob size** and **never re-hashes**: the CAS already streams, so peeking the 1 magic byte (the same `isJSON` rule) is free; the CID is then `cid.NewCidV1(uint64(codec), mh).StringOfBase(multibase.Base32hex)` where `codec` is `multicodec.Raw` or `multicodec.Json`. A 1-byte read + composition replaces both the old "store the string" and the old full-file re-hashing: nothing is lost by dropping the CID string, and a 4 GB SIF costs the same as a 12 B config.
+- The multihash is the key only; the CID (codec + multibase) is *derived*, not stored. If a `lookup`/name→CID command is ever re-added it is **constant time regardless of blob size** and **never re-hashes**: the CAS already streams, so peeking the 1 magic byte (the same `detectCodec` rule) is free; the CID is then `computeCID(mh, codec)` (where `codec` is `multicodec.Raw` or `multicodec.Json`) rendered with the same `stringFromCID` helper used by `add`/`hash`. A 1-byte read + composition replaces both the old "store the string" and the old full-file re-hashing: nothing is lost by dropping the CID string, and a 4 GB SIF costs the same as a 12 B config.
 - Dir backend: the index entry is a symlink `index/<name> -> ../<prefix>/<rest>` pointing at the blob, so reading the entry directly yields the content (`cat .blob-store/index/<name>` works). SQL backend: a `names (name, hash)` table where `hash REFERENCES blobs(hash)` — a real foreign key, since the index value is a blob key.
 - `get` parses a CID to its multihash first, and only falls back to the name index when the argument is not a CID, so a CID is never shadowed by a name.
 - Per-name files / rows instead of a shared `index.json` as OCI registries use: each update is an atomic single-key write (symlink + rename, primary-key upsert), with no read-modify-write of one shared document.

@@ -95,13 +95,6 @@ func codecName(code uint64) string {
 	return multicodec.Code(code).String()
 }
 
-func isJSON(data []byte) bool {
-	if len(data) == 0 {
-		return false
-	}
-	return data[0] == '{' || data[0] == '['
-}
-
 func computeHash(filePath string) (multihash.Multihash, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -122,29 +115,38 @@ func computeHash(filePath string) (multihash.Multihash, error) {
 	return mh, nil
 }
 
-func isJSONFile(filePath string) (bool, error) {
+// detectCodec picks the content-based codec (DESIGN.md) from the file's
+// first byte: Json if it is '{' or '[', otherwise Raw (including for an
+// empty file).
+func detectCodec(filePath string) (multicodec.Code, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	defer file.Close()
 
 	buf := make([]byte, 1)
-	_, err = file.Read(buf)
-	if err != nil {
-		return false, err
+	n, err := file.Read(buf)
+	if err != nil && err != io.EOF {
+		return 0, err
 	}
 
-	return isJSON(buf), nil
+	// Json for a leading '{' or '['; otherwise (or empty) Raw.
+	if n > 0 && (buf[0] == '{' || buf[0] == '[') {
+		return multicodec.Json, nil
+	}
+	return multicodec.Raw, nil
 }
 
-func computeCID(mh multihash.Multihash, isJSON bool) (cid.Cid, error) {
-	codec := multicodec.Raw
-	if isJSON {
-		codec = multicodec.Json
-	}
+// computeCID builds a CIDv1 from a multihash and a codec.
+func computeCID(mh multihash.Multihash, mc multicodec.Code) (cid.Cid, error) {
+	return cid.NewCidV1(uint64(mc), mh), nil
+}
 
-	return cid.NewCidV1(uint64(codec), mh), nil
+// stringFromCID renders a CID as the user-facing base32hex string
+// (this store's presentation choice, see DESIGN.md).
+func stringFromCID(c cid.Cid) (string, error) {
+	return c.StringOfBase(multibase.Base32hex)
 }
 
 func digestFromCID(c cid.Cid) (storage.Digest, error) {
@@ -181,7 +183,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	isJSON, err := isJSONFile(filePath)
+	mc, err := detectCodec(filePath)
 	if err != nil {
 		return err
 	}
@@ -191,11 +193,11 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	cidObj, err := computeCID(mh, isJSON)
+	c, err := computeCID(mh, mc)
 	if err != nil {
 		return err
 	}
-	cidStr, err := cidObj.StringOfBase(multibase.Base32hex)
+	cidStr, err := stringFromCID(c)
 	if err != nil {
 		return err
 	}
@@ -205,7 +207,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	digest := storage.Digest(cidObj.Hash())
+	digest := storage.Digest(c.Hash())
 
 	backend, err := getStorageBackend()
 	if err != nil {
@@ -246,7 +248,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 func runHash(cmd *cobra.Command, args []string) error {
 	filePath := args[0]
 
-	isJSON, err := isJSONFile(filePath)
+	mc, err := detectCodec(filePath)
 	if err != nil {
 		return err
 	}
@@ -256,11 +258,11 @@ func runHash(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	cidObj, err := computeCID(mh, isJSON)
+	c, err := computeCID(mh, mc)
 	if err != nil {
 		return err
 	}
-	cidStr, err := cidObj.StringOfBase(multibase.Base32hex)
+	cidStr, err := stringFromCID(c)
 	if err != nil {
 		return err
 	}
