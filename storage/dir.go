@@ -106,7 +106,7 @@ func (s *DirStorage) Has(hash Digest) (bool, error) {
 // content. The relative target is "../" + relPath, one "../" hop back to
 // the store root regardless of the fanout depth.
 func (s *DirStorage) Index(name string, hash Digest) error {
-	if strings.ContainsRune(name, os.PathSeparator) || name == ".." {
+	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, os.PathSeparator) {
 		return fmt.Errorf("invalid index name %q", name)
 	}
 
