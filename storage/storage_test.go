@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -41,7 +42,7 @@ func pathFor(backend StorageType, dir string) string {
 
 func mustNew(t *testing.T, backend StorageType, path string, mode Mode) StorageBackend {
 	t.Helper()
-	b, err := NewStorage(backend, path, mode)
+	b, err := NewStorage(backend, path, Auth{}, mode)
 	if err != nil {
 		t.Fatalf("NewStorage(%s, %q, %v): %v", backend, path, mode, err)
 	}
@@ -390,4 +391,108 @@ func readBlob(b StorageBackend, key Digest) ([]byte, error) {
 		return nil, err
 	}
 	return got, nil
+}
+
+// TestHTTPAuth verifies the http backend's credential handling: a server that
+// demands Basic auth returns a terse 401 (no HTML dump) when no credentials
+// are supplied, and the same operation succeeds when Auth carries the expected
+// pair. This is the storage-side contract — the CLI resolves Auth from
+// flags/env/.netrc and this layer applies it.
+func TestHTTPAuth(t *testing.T) {
+	const wantUser, wantPass = "alice", "s3cret"
+
+	// nginx-style 401 body, as a real proxy would emit it.
+	nginx401 := `<html>
+<head><title>401 Authorization Required</title></head>
+<body>
+<center><h1>401 Authorization Required</h1></center>
+<hr><center>nginx/1.24.0 (Ubuntu)</center>
+</body>
+</html>`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, p, ok := r.BasicAuth()
+		if !ok || u != wantUser || p != wantPass {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, nginx401)
+			return
+		}
+		switch r.Method {
+		case http.MethodPut:
+			_, _ = io.Copy(io.Discard, r.Body)
+		case http.MethodGet, http.MethodHead:
+			_, _ = w.Write([]byte("blob"))
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer srv.Close()
+
+	key := sha256Multihash([]byte("blob"))
+	body := bytes.NewReader([]byte("blob"))
+
+	// No credentials -> 401, and the message is the terse hint, NOT the HTML.
+	b := mustNew(t, StorageHTTP, srv.URL, ReadWrite)
+	defer b.Close()
+	if err := b.Put(key, 4, body); err == nil {
+		t.Fatal("Put without auth: expected 401 error, got nil")
+	} else if strings.Contains(err.Error(), "nginx") {
+		t.Fatalf("401 error leaked server HTML: %q", err.Error())
+	} else if !strings.Contains(err.Error(), "authentication") {
+		t.Fatalf("401 error does not read as an auth problem: %q", err.Error())
+	}
+
+	// Correct credentials -> success, same endpoint.
+	bAuth, err := NewHTTPStorage(srv.URL, Auth{User: wantUser, Password: wantPass}, ReadWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bAuth.Close()
+	if err := bAuth.Put(key, 4, bytes.NewReader([]byte("blob"))); err != nil {
+		t.Fatalf("Put with auth: %v", err)
+	}
+	if got, err := readBlob(bAuth, key); err != nil || string(got) != "blob" {
+		t.Fatalf("Get with auth = %q, %v; want %q", got, err, "blob")
+	}
+
+	// Sanity: the Auth struct reports whether it would send a header.
+	if (Auth{User: "u"}).hasCredentials() {
+		t.Fatal("bare user should not count as credentials")
+	}
+	if !(Auth{User: "u", Password: "p"}).hasCredentials() {
+		t.Fatal("user+pass should count as credentials")
+	}
+}
+
+// TestHTTPErrorFormatting pins the expected-status wording: 404 reads as
+// "not found", 401/403 as a terse auth hint, and a 5xx stays honest about being
+// a server fault without dumping the HTML body. It drives httpError directly
+// (the http backend only speaks fixed on-wire paths, so this is the cleanest
+// level to assert the message text).
+func TestHTTPErrorFormatting(t *testing.T) {
+	type want struct {
+		sub, not string
+	}
+	tests := []struct {
+		status int
+		body   string
+		want   want
+	}{
+		{http.StatusNotFound, `<html>...404...`, want{sub: "not found"}},
+		{http.StatusUnauthorized, `<html><head><title>401 Authorization Required</title></head><body>nginx</body></html>`, want{sub: "authentication", not: "nginx"}},
+		{http.StatusForbidden, `<html>403</html>`, want{sub: "authentication", not: "<html"}},
+		{http.StatusInternalServerError, `<html><body><h1>500 Internal</h1></body></html>`, want{sub: "HTTP 500", not: "<h1"}},
+	}
+	for _, tc := range tests {
+		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+			e := &httpError{status: tc.status, method: "GET", key: "1220…", body: tc.body}
+			s := e.Error()
+			if !strings.Contains(s, tc.want.sub) {
+				t.Fatalf("status %d: want substring %q in %q", tc.status, tc.want.sub, s)
+			}
+			if tc.want.not != "" && strings.Contains(s, tc.want.not) {
+				t.Fatalf("status %d: must not leak %q in %q", tc.status, tc.want.not, s)
+			}
+		})
+	}
 }

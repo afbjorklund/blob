@@ -81,7 +81,7 @@ type StorageBackend interface {
 	Close() error
 }
 
-func NewStorage(backend StorageType, path string, mode Mode) (StorageBackend, error) {
+func NewStorage(backend StorageType, path string, auth Auth, mode Mode) (StorageBackend, error) {
 	switch backend {
 	case StorageDir:
 		return NewDirStorage(path, mode)
@@ -90,8 +90,10 @@ func NewStorage(backend StorageType, path string, mode Mode) (StorageBackend, er
 	case StorageHTTP:
 		// For the http backend the `path` argument is the base URL of the
 		// server (e.g. http://localhost:8080), not a local store dir — the
-		// store lives on the remote side and the backend is a thin proxy.
-		return NewHTTPStorage(path, mode)
+		// store lives on the remote side and the backend is a thin proxy. `auth`
+		// are the explicit credentials (from --user/--pass); when absent the
+		// http backend fills them from the URL's user:pass@ then ~/.netrc.
+		return NewHTTPStorage(path, auth, mode)
 	default:
 		return nil, errors.New("unknown storage backend")
 	}

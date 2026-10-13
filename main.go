@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,6 +31,8 @@ var (
 	outputPath  string
 	hashOnly    bool
 	listenAddr  string
+	httpUser    string
+	httpPass    string
 )
 
 func defaultStorageType() string {
@@ -45,15 +49,153 @@ func defaultStoragePath() string {
 	return "./.blob-store"
 }
 
+func defaultHTTPUser() string {
+	return os.Getenv("BLOB_USER")
+}
+
+func defaultHTTPPass() string {
+	return os.Getenv("BLOB_PASS")
+}
+
+// resolveCLIAuth decides which Basic-auth credentials (if any) the http backend
+// should use, from the places a user would realistically keep them. Precedence,
+// highest first:
+//
+//  1. the --user/--pass pair (the flags default to BLOB_USER/BLOB_PASS, so an
+//     explicit flag or the env pair both land here);
+//  2. user:pass@ embedded in the --path URL (the quick token-in-a-URL case);
+//  3. the user's ~/.netrc entry for the host — the durable, chmod-600 home for
+//     secrets, keeping them out of shell history and the process argv.
+//
+// Only the http backend actually applies the value (dir and sql ignore it). If
+// no source yields a user name, the zero Auth is returned and nothing is sent.
+func resolveCLIAuth() storage.Auth {
+	if httpUser != "" || os.Getenv("BLOB_USER") != "" {
+		return storage.Auth{User: httpUser, Password: httpPass}
+	}
+	if u, p, ok := credsFromURL(storagePath); ok {
+		return storage.Auth{User: u, Password: p}
+	}
+	return netrcAuth(hostOf(storagePath))
+}
+
+// credsFromURL extracts user:pass from a URL's userinfo, if present.
+func credsFromURL(raw string) (string, string, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return "", "", false
+	}
+	pass, _ := u.User.Password()
+	return u.User.Username(), pass, true
+}
+
+// hostOf returns the host component of a URL (for netrc keying).
+func hostOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// netrcPath is where the .netrc is read from, honoring $NETRC and falling back
+// to the user's home directory (the same resolution curl and friends use).
+func netrcPath() string {
+	if p := os.Getenv("NETRC"); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".netrc")
+}
+
+// netrcAuth returns the credentials for host from the user's .netrc, or a zero
+// Auth if the file is absent or has no entry for the host. A specific `machine`
+// entry for the host wins over the `default` entry, which is the fallback for
+// hosts with no specific entry.
+func netrcAuth(host string) storage.Auth {
+	data, err := os.ReadFile(netrcPath())
+	if err != nil {
+		return storage.Auth{}
+	}
+
+	blocks := parseNetrc(string(data))
+	if c, ok := blocks[host]; ok && c.User != "" {
+		return c
+	}
+	if c, ok := blocks["default"]; ok {
+		return c
+	}
+	return storage.Auth{}
+}
+
+// parseNetrc splits a .netrc into per-host credential blocks. Only the
+// directives this store needs are understood — `machine`, `default`, `login`
+// and `password`; everything else (account, macdef, ...) is ignored. It
+// tokenizes the whole file, so the one-token-per-line layout .netrc allows is
+// equivalent to the more common one-line-per-block layout.
+func parseNetrc(data string) map[string]storage.Auth {
+	const defaultKey = "default"
+	blocks := map[string]storage.Auth{}
+
+	current, login, pass := "", "", ""
+
+	flush := func() {
+		if current != "" {
+			blocks[current] = storage.Auth{User: login, Password: pass}
+		}
+		current, login, pass = "", "", ""
+	}
+
+	fields := strings.Fields(data)
+	for i := 0; i < len(fields); i++ {
+		switch fields[i] {
+		case "machine":
+			flush()
+			if i+1 < len(fields) {
+				i++
+				current = fields[i]
+			}
+		case "default":
+			flush()
+			current = defaultKey
+		case "login":
+			if i+1 < len(fields) {
+				i++
+				login = fields[i]
+			}
+		case "password":
+			if i+1 < len(fields) {
+				i++
+				pass = fields[i]
+			}
+		}
+	}
+	flush()
+
+	return blocks
+}
+
 func main() {
 	rootCmd := &cobra.Command{
 		Use:     "blob",
 		Short:   "A simple content-addressable blob store",
 		Version: "0.1.0",
+		// A command that returns an error should not be interrupted by a wall
+		// of usage text (that is a "I mistyped the flags" signal, not a "the
+		// server said no" one). Silence cobra's own error + usage prints; the
+		// error is reported exactly once, from main — so a 401 reads as a plain
+		// line rather than error → usage → error.
+		SilenceErrors: true,
+		SilenceUsage:  true,
 	}
 
 	rootCmd.PersistentFlags().StringVarP(&storageType, "storage", "s", defaultStorageType(), "storage backend (dir, sql, or http)")
 	rootCmd.PersistentFlags().StringVarP(&storagePath, "path", "p", defaultStoragePath(), "storage path (local dir for dir/sql; base URL for http)")
+	rootCmd.PersistentFlags().StringVarP(&httpUser, "user", "u", defaultHTTPUser(), "http backend Basic-auth user (or BLOB_USER, or user:pass@ in --path)")
+	rootCmd.PersistentFlags().StringVar(&httpPass, "pass", defaultHTTPPass(), "http backend Basic-auth password/token (or BLOB_PASS, or the pass in user:pass@ --path)")
 
 	addCmd := &cobra.Command{
 		Use:   "add <file>",
@@ -423,9 +565,10 @@ func runLookup(cmd *cobra.Command, args []string) error {
 // getStorageBackend opens a backend in the requested mode and returns it for
 // single use (the caller must Close). mode distinguishes the CLI write path
 // (add, which needs to write) from the read path (get / lookup, which only
-// reads and so should not create or mutate the store).
+// reads and so should not create or mutate the store). The resolved Basic-auth
+// credentials ride along for the http backend (a no-op for dir and sql).
 func getStorageBackend(mode storage.Mode) (storage.StorageBackend, error) {
-	return storage.NewStorage(storage.StorageType(storageType), storagePath, mode)
+	return storage.NewStorage(storage.StorageType(storageType), storagePath, resolveCLIAuth(), mode)
 }
 
 // runServe starts a read-only HTTP gateway for the store, so a stable

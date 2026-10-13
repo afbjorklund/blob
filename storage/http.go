@@ -15,6 +15,22 @@ import (
 // (<base>/index/<name>), mirroring the dir backend's index/ subdirectory.
 const indexPrefix = "index"
 
+// Auth is the pair of Basic-auth credentials an http backend sends to the
+// server. It is a plain value the CLI resolves from wherever the secret lives
+// (--user/--pass flags, BLOB_USER/BLOB_PASS, the user's ~/.netrc, or
+// user:pass@ in the --path URL) and hands over; the storage layer only applies
+// it and never decides where it came from. Because this store speaks plain HTTP
+// by default, the password is often a shared, revocable token rather than a
+// real account password.
+type Auth struct {
+	User     string
+	Password string
+}
+
+// hasCredentials reports whether the pair would produce a Basic header (a user
+// name is required; a bare password has no addressable identity to bind it to).
+func (a Auth) hasCredentials() bool { return a.User != "" && a.Password != "" }
+
 // HTTPStorage proxies a multihash-keyed CAS to a remote server over plain
 // GET / PUT (and HEAD for an existence check). It is a *storage* backend with
 // its own on-wire contract, independent of the read-only CID gateway (`serve`):
@@ -37,9 +53,12 @@ type HTTPStorage struct {
 	transport *http.Transport
 	readOnly  bool
 	closed    bool
+	// auth carries the resolved Basic-auth credentials (user + token/password)
+	// to send with every request; empty when the target needs none.
+	auth Auth
 }
 
-func NewHTTPStorage(base string, mode Mode) (*HTTPStorage, error) {
+func NewHTTPStorage(base string, auth Auth, mode Mode) (*HTTPStorage, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return nil, fmt.Errorf("invalid storage URL %q: %v", base, err)
@@ -56,15 +75,22 @@ func NewHTTPStorage(base string, mode Mode) (*HTTPStorage, error) {
 		ForceAttemptHTTP2:   true,
 	}
 
-	// No client-wide Timeout: a large blob must be allowed to stream for as
-	// long as it needs (a per-operation context would be the right knob, but
-	// the StorageBackend interface does not carry one).
-	return &HTTPStorage{
+	// Credentials are applied per request (see do). The URL's own userinfo
+	// (if the base was written as http://user:pass@host/...) is stripped here
+	// so the host we store and log is clean — the secret rides on auth, not in
+	// the path. The CLI is free to have taken that userinfo into auth for us.
+	if u.User != nil {
+		u.User = nil
+	}
+
+	st := &HTTPStorage{
 		baseURL:   u,
 		client:    &http.Client{Transport: transport},
 		transport: transport,
 		readOnly:  mode != ReadWrite,
-	}, nil
+		auth:      auth,
+	}
+	return st, nil
 }
 
 // blobURL is the on-wire path of a blob, keying by the hex of the multihash
@@ -82,7 +108,11 @@ func (s *HTTPStorage) nameURL(name string) string {
 func ok(status int) bool { return status >= 200 && status <= 299 }
 
 // httpError carries the status of a non-2xx response so callers can distinguish
-// a definitive 404 (→ "not found") from a server error or other failure.
+// a definitive 404 (→ "not found") from a server error or other failure. The
+// message is deliberately terse for the *expected* outcomes (401, 404) — the
+// ones a well-behaved caller should not treat as a crash — and falls back to
+// the one-line server reason for everything else, so an nginx/HTML body is
+// never dumped wholesale onto the terminal.
 type httpError struct {
 	status int
 	method string
@@ -91,17 +121,52 @@ type httpError struct {
 }
 
 func (e *httpError) Error() string {
-	msg := fmt.Sprintf("HTTP %d", e.status)
-	if e.body != "" {
-		msg += ": " + strings.TrimSpace(e.body)
+	switch e.status {
+	case http.StatusNotFound:
+		return "blob not found"
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "authentication required"
+	default:
+		reason := http.StatusText(e.status)
+		if b := plainFirstLine(e.body); b != "" {
+			reason += ": " + b
+		}
+		return fmt.Sprintf("%s %s -> HTTP %d %s", e.method, e.key, e.status, reason)
 	}
-	return e.method + " " + e.key + " -> " + msg
+}
+
+// plainFirstLine returns the first non-empty, trimmed line of a response body
+// (capped in length) for use in an error message — but only when that line does
+// not look like markup or structured data (HTML/X, JSON). A real server may send
+// a short plain-text reason ("quota exceeded", "rate limit hit") and we surface
+// that; the common case of an HTML error page is not worth fragmenting, so we
+// fall back to the status text alone. It returns "" when there is no usable line.
+func plainFirstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.ContainsAny(line, "<>{}\"") {
+			return "" // markup/JSON fragment — keep it out of the human message
+		}
+		if len(line) > 200 {
+			line = line[:200] + "…"
+		}
+		return line
+	}
+	return ""
 }
 
 // do runs the request and returns the response, translating non-2xx statuses
-// into a *httpError. The caller owns and closes resp.Body on the success
-// path; on the error path the body is already read and closed here.
+// into a *httpError. Any resolved Basic-auth credentials are attached here, so
+// every operation (Put, Get, Has, Index, Lookup, Peek) is authenticated
+// uniformly. The caller owns and closes resp.Body on the success path; on the
+// error path the body is already read and closed here.
 func (s *HTTPStorage) do(r *http.Request, method, key string) (*http.Response, error) {
+	if s.auth.hasCredentials() {
+		r.SetBasicAuth(s.auth.User, s.auth.Password)
+	}
 	resp, err := s.client.Do(r)
 	if err != nil {
 		return nil, err
