@@ -8,8 +8,9 @@ import (
 type StorageType string
 
 const (
-	StorageDir StorageType = "dir"
-	StorageSQL StorageType = "sql"
+	StorageDir  StorageType = "dir"
+	StorageSQL  StorageType = "sql"
+	StorageHTTP StorageType = "http"
 )
 
 // Mode is how a backend opens a store. It is the storage-layer analogue of an
@@ -86,6 +87,11 @@ func NewStorage(backend StorageType, path string, mode Mode) (StorageBackend, er
 		return NewDirStorage(path, mode)
 	case StorageSQL:
 		return NewSQLStorage(path, mode)
+	case StorageHTTP:
+		// For the http backend the `path` argument is the base URL of the
+		// server (e.g. http://localhost:8080), not a local store dir — the
+		// store lives on the remote side and the backend is a thin proxy.
+		return NewHTTPStorage(path, mode)
 	default:
 		return nil, errors.New("unknown storage backend")
 	}

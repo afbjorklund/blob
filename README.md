@@ -11,9 +11,10 @@ See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
 - **Pluggable storage backends**:
   - Directory (`--path` dir; files sharded across up to 3 one-byte fanout levels: `<byte0>/<byte1>/<byte2>/<rest of hex>`, e.g. `12/20/...`)
   - SQLite (single database file at `--path`)
+  - HTTP (`--path` base URL; a thin GET/PUT proxy to a remote server, blobs at `<base>/<hex>`)
 - **Streaming I/O** - Files are streamed to and from the backend without materializing the entire blob in memory. The `sqlite` backend reads via SQLite's blob API (`db.OpenBlob` in a read-only handle) instead of loading the whole row
 - **Read-only HTTP gateway** - A built-in `blob serve` command (like the IPFS HTTP gateway, but for this local store) serves `GET /blob/<CID>`, so a stable `blob://<CID>` scheme can be mapped to `http://<host>/blob/<CID>` without the client knowing the backend or storage path. Response carries `Content-Type` (from the CID codec), `Content-Length`, and `Content-Digest: sha-256=…` (the stored multihash digest). `GET /name/<name>` resolves the name and `302`-redirects to the canonical `/blob/<CID>`
-- **Name index** - A separate per-name index in each backend (symlink in the dir backend, foreign-keyed table in the sql backend) lets you resolve a name to the exact stored blob CID (e.g. `ubuntu_latest.sif` and `ubuntu_26.04.sif` both resolve to the same blob). Last add wins, so `latest`-style aliases update as new content is stored
+- **Name index** - A separate per-name index in each backend (symlink in the dir backend, foreign-keyed table in the sql backend, an `index/<name>` object holding the hash in the http backend) lets you resolve a name to the exact stored blob CID (e.g. `ubuntu_latest.sif` and `ubuntu_26.04.sif` both resolve to the same blob). Last add wins, so `latest`-style aliases update as new content is stored
 
 ## Usage
 
@@ -34,8 +35,8 @@ blob add <file>
 ```
 
 Options:
-- `--storage dir|sql` - Storage backend (default: `dir`)
-- `--path <dir|dbfile>` - Storage location
+- `--storage dir|sql|http` - Storage backend (default: `dir`)
+- `--path <dir|dbfile|url>` - Storage location (a local dir/dbfile for `dir`/`sql`; a base URL for `http`)
 
 ### Get from blob store
 
@@ -168,6 +169,24 @@ Retrieved: v05ah487ip8drdhv90v86rbv4d1v5f7ueeqpnsjkjmtg508mqabjcpgjfq8 -> output
 $ cat output.txt
 test
 ```
+
+### HTTP backend
+
+Point `--path` at a remote server and the store (blobs and name index) lives there — `add` issues `PUT`, `get`/`lookup` issue `GET` (and `HEAD` for the existence check the CLI uses before storing). Blobs are addressed by the hex of the multihash, the name index lives at `index/<name>` (the body is the hex multihash — the server-side counterpart of the dir backend's symlink / sql foreign key):
+
+```console
+# server on http://localhost:8099 storing blobs at /<hex> and names at /index/<name>
+$ blob --storage http --path http://localhost:8099 add test.txt
+Added: v05ah487ip8drdhv90v86rbv4d1v5f7ueeqpnsjkjmtg508mqabjcpgjfq8
+
+$ blob --storage http --path http://localhost:8099 get v05ah487ip8drdhv90v86rbv4d1v5f7ueeqpnsjkjmtg508mqabjcpgjfq8 -o output.txt
+Retrieved: v05ah487ip8drdhv90v86rbv4d1v5f7ueeqpnsjkjmtg508mqabjcpgjfq8 -> output.txt
+
+$ blob --storage http --path http://localhost:8099 get test.txt -o output.txt
+Retrieved: test.txt -> output.txt
+```
+
+This is a *storage* backend (the client talks hash-based over GET/PUT); it is distinct from `blob serve`, which is the read-only user-facing CID gateway (`/blob/<CID>`, `/name/<name>`).
 
 ## License
 

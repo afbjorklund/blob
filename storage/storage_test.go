@@ -5,7 +5,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,13 +24,14 @@ func sha256Multihash(data []byte) []byte {
 }
 
 // backendNames is the set of backends the shared tests run against, so the
-// dir and sql backends are held to the same contract.
+// dir, sql and http backends are held to the same contract.
 func backendNames() []StorageType {
-	return []StorageType{StorageDir, StorageSQL}
+	return []StorageType{StorageDir, StorageSQL, StorageHTTP}
 }
 
 // pathFor maps a backend type to the path NewStorage expects under dir: a
-// directory for the dir backend, a database file for the sql backend.
+// directory for the dir backend, a database file for the sql backend. (The http
+// backend takes a base URL, so its path is resolved separately in the tests.)
 func pathFor(backend StorageType, dir string) string {
 	if backend == StorageSQL {
 		return filepath.Join(dir, "store.db")
@@ -34,13 +39,109 @@ func pathFor(backend StorageType, dir string) string {
 	return dir
 }
 
-func mustNew(t *testing.T, backend StorageType, dir string, mode Mode) StorageBackend {
+func mustNew(t *testing.T, backend StorageType, path string, mode Mode) StorageBackend {
 	t.Helper()
-	b, err := NewStorage(backend, pathFor(backend, dir), mode)
+	b, err := NewStorage(backend, path, mode)
 	if err != nil {
-		t.Fatalf("NewStorage(%s, %q, %v): %v", backend, dir, mode, err)
+		t.Fatalf("NewStorage(%s, %q, %v): %v", backend, path, mode, err)
 	}
 	return b
+}
+
+// newHTTPTestServer starts an in-memory httptest server implementing the
+// on-wire contract the http backend speaks (GET/PUT/HEAD on /<hex> for blobs
+// and PUT/GET on /name/<name> for the name index, the latter body the hex
+// multihash). It is the remote the tests point NewStorage(StorageHTTP) at, so
+// the http backend is held to the same read/write contract as dir and sql. It
+// does not honor Range requests (a permitted server behavior), so Peek is
+// exercised via a full 200 body.
+func newHTTPTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	var mu sync.Mutex
+	blobs := map[string][]byte{}
+	index := map[string][]byte{}
+
+	handle := func(w http.ResponseWriter, r *http.Request) {
+		target := strings.TrimPrefix(r.URL.Path, "/")
+
+		if isIndexPath(target) {
+			name := strings.TrimPrefix(target, indexPrefix+"/")
+			switch r.Method {
+			case http.MethodPut:
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				mu.Lock()
+				index[name] = body
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+			case http.MethodGet:
+				mu.Lock()
+				v, found := index[name]
+				mu.Unlock()
+				if !found {
+					http.Error(w, "name not found", http.StatusNotFound)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(v)
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}
+			return
+		}
+
+		id := target
+		switch r.Method {
+		case http.MethodPut:
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			blobs[id] = body
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			mu.Lock()
+			b, found := blobs[id]
+			mu.Unlock()
+			if !found {
+				http.Error(w, "blob not found", http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(b)
+		case http.MethodHead:
+			mu.Lock()
+			b, found := blobs[id]
+			mu.Unlock()
+			if !found {
+				http.Error(w, "blob not found", http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(handle))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// isIndexPath reports whether target is a name index entry ("index/<name>"),
+// as opposed to a blob id (a bare hex segment).
+func isIndexPath(target string) bool {
+	return strings.HasPrefix(target, indexPrefix+"/")
 }
 
 // TestRoundTrip exercises the full read/write contract of every backend:
@@ -55,6 +156,12 @@ func TestRoundTrip(t *testing.T) { //nolint:gocyclo
 	for _, backend := range backendNames() {
 		t.Run(string(backend), func(t *testing.T) {
 			dir := t.TempDir()
+			path := pathFor(backend, dir)
+			if backend == StorageHTTP {
+				// One shared in-memory server for the whole subtest, so the
+				// store persists across the reopen steps below.
+				path = newHTTPTestServer(t).URL
+			}
 
 			big := make([]byte, 4<<10)
 			if _, err := rand.Read(big); err != nil {
@@ -68,7 +175,7 @@ func TestRoundTrip(t *testing.T) { //nolint:gocyclo
 				{key: []byte("key-3"), value: nil}, // empty value
 			}
 
-			w := mustNew(t, backend, dir, ReadWrite)
+			w := mustNew(t, backend, path, ReadWrite)
 			for _, e := range entries {
 				if err := w.Put(e.key, int64(len(e.value)), bytes.NewReader(e.value)); err != nil {
 					t.Fatalf("Put(%q): %v", e.key, err)
@@ -140,7 +247,7 @@ func TestRoundTrip(t *testing.T) { //nolint:gocyclo
 			}
 
 			// Persistence: reopen read-write and the data is still there.
-			w2 := mustNew(t, backend, dir, ReadWrite)
+			w2 := mustNew(t, backend, path, ReadWrite)
 			if ok, err := w2.Has(wrtKey); err != nil || !ok {
 				t.Fatalf("Has after reopen = %v, %v; want true, nil", ok, err)
 			}
@@ -149,7 +256,7 @@ func TestRoundTrip(t *testing.T) { //nolint:gocyclo
 			}
 
 			// Read-only: reads work, writes are refused.
-			ro := mustNew(t, backend, dir, ReadOnly)
+			ro := mustNew(t, backend, path, ReadOnly)
 			if ok, err := ro.Has(wrtKey); err != nil || !ok {
 				t.Fatalf("read-only Has = %v, %v; want true, nil", ok, err)
 			}
@@ -179,6 +286,10 @@ func TestConcurrentReads(t *testing.T) {
 	for _, backend := range backendNames() {
 		t.Run(string(backend), func(t *testing.T) {
 			dir := t.TempDir()
+			path := pathFor(backend, dir)
+			if backend == StorageHTTP {
+				path = newHTTPTestServer(t).URL
+			}
 
 			payload := make([]byte, 2<<20)
 			if n, err := rand.Read(payload); err != nil || n != len(payload) {
@@ -187,7 +298,7 @@ func TestConcurrentReads(t *testing.T) {
 
 			// Seed one big blob keyed by its (properly-sized) multihash and index it.
 			key := sha256Multihash(payload)
-			w := mustNew(t, backend, dir, ReadWrite)
+			w := mustNew(t, backend, path, ReadWrite)
 			if err := w.Put(key, int64(len(payload)), bytes.NewReader(payload)); err != nil {
 				t.Fatal(err)
 			}
@@ -198,7 +309,7 @@ func TestConcurrentReads(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			ro := mustNew(t, backend, dir, ReadOnly)
+			ro := mustNew(t, backend, path, ReadOnly)
 			defer ro.Close()
 
 			// A writer adds distinct new blobs concurrently with the readers; the
@@ -207,7 +318,7 @@ func TestConcurrentReads(t *testing.T) {
 			// `ro` stays read-only: the sql backend does this in WAL mode (readers
 			// unblocked by a writer), the dir backend by writing a fresh file per
 			// key.
-			writer := mustNew(t, backend, dir, ReadWrite)
+			writer := mustNew(t, backend, path, ReadWrite)
 			defer writer.Close()
 
 			const writerBlobs = 8

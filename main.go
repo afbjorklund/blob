@@ -52,8 +52,8 @@ func main() {
 		Version: "0.1.0",
 	}
 
-	rootCmd.PersistentFlags().StringVarP(&storageType, "storage", "s", defaultStorageType(), "storage backend (dir or sql)")
-	rootCmd.PersistentFlags().StringVarP(&storagePath, "path", "p", defaultStoragePath(), "storage path")
+	rootCmd.PersistentFlags().StringVarP(&storageType, "storage", "s", defaultStorageType(), "storage backend (dir, sql, or http)")
+	rootCmd.PersistentFlags().StringVarP(&storagePath, "path", "p", defaultStoragePath(), "storage path (local dir for dir/sql; base URL for http)")
 
 	addCmd := &cobra.Command{
 		Use:   "add <file>",
