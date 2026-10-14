@@ -246,6 +246,15 @@ func main() {
 
 	rootCmd.AddCommand(getCmd)
 
+	catCmd := &cobra.Command{
+		Use:   "cat <cid|name>",
+		Short: "Write a blob's content to stdout (nothing else)",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runCat,
+	}
+
+	rootCmd.AddCommand(catCmd)
+
 	lookupCmd := &cobra.Command{
 		Use:   "lookup <name>",
 		Short: "Look up the CID of a stored blob by its index name",
@@ -498,28 +507,37 @@ func runHash(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// resolveDigest turns a get/cat argument into the blob's digest
+// (multihash): parsed as a CID when possible (no backend needed), or
+// resolved via the read-only backend's name index otherwise.
+func resolveDigest(arg string) (storage.Digest, error) {
+	if c, err := cid.Parse(arg); err == nil {
+		digest, err := digestFromCID(c)
+		if err != nil {
+			return nil, err
+		}
+		return digest, nil
+	}
+
+	backend, err := getStorageBackend(storage.ReadOnly)
+	if err != nil {
+		return nil, err
+	}
+	defer backend.Close()
+
+	digest, err := backend.Lookup(arg)
+	if err != nil {
+		return nil, fmt.Errorf("%q: name not found in index", arg)
+	}
+	return digest, nil
+}
+
 func runGet(cmd *cobra.Command, args []string) error {
 	arg := args[0]
 
-	var digest storage.Digest
-	if c, err := cid.Parse(arg); err != nil {
-		backend, berr := getStorageBackend(storage.ReadOnly)
-		if berr != nil {
-			return berr
-		}
-		defer backend.Close()
-
-		var lerr error
-		digest, lerr = backend.Lookup(arg)
-		if lerr != nil {
-			return fmt.Errorf("%q: name not found in index", arg)
-		}
-	} else {
-		var derr error
-		digest, derr = digestFromCID(c)
-		if derr != nil {
-			return derr
-		}
+	digest, err := resolveDigest(arg)
+	if err != nil {
+		return err
 	}
 
 	if outputPath == "" {
@@ -532,7 +550,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 	}
 	defer backend.Close()
 
-	reader, _, err := backend.Get(digest)
+	reader, size, err := backend.Get(digest)
 	if err != nil {
 		return err
 	}
@@ -554,6 +572,32 @@ func runGet(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Retrieved: %s -> %s\n", arg, outputPath)
+	return nil
+}
+
+func runCat(cmd *cobra.Command, args []string) error {
+	arg := args[0]
+
+	digest, err := resolveDigest(arg)
+	if err != nil {
+		return err
+	}
+
+	backend, err := getStorageBackend(storage.ReadOnly)
+	if err != nil {
+		return err
+	}
+	defer backend.Close()
+
+	reader, _, err := backend.Get(digest)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	if _, err := io.Copy(os.Stdout, reader); err != nil {
+		return err
+	}
 	return nil
 }
 
