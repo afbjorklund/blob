@@ -38,16 +38,23 @@ what the bytes *are* (JSON vs. raw bytes). The address is self-describing:
 from the CID alone you can tell how the content was hashed and what kind of
 thing it is, without consulting any metadata store.
 
-In `blob`, the CID is CIDv1 rendered in **base32hex** — a `v01`-style string
-of `0-9a-f` characters, e.g.
+In `blob`, the CID is CIDv1 rendered in **base32hex** — a 5-bits-per-character
+multibase encoding using the alphabet `0-9a-v` (whose first 16 characters,
+`0-9a-f`, are exactly base16hex), e.g.
 
 ```
 v05ah4859p5vrofmfpdv5i8om998c9k4gd0ge2shctr5jofc6ufj3ghgf8k
 ```
 
-The leading `v` prefix and the `0-9a-f` alphabet are a deliberate,
-store-specific choice (IPFS uses `base32`'s `yzabcde…` alphabet by default);
-what matters is the property of being content-derived and self-describing.
+Note the `p`, `u`, `v` in that string — they come from `base32hex`'s `g-v`
+tail, which plain base16 has no room for. The **back-end** key, by contrast,
+is plain `base16` hex of the multihash digest bytes (`0-9a-f`, 16 characters)
+— the fanout directories you see in the dir backend, and the object key the
+`http`/`s3` backends transmit. So the CID (front-end → `base32hex`,
+`0-9a-v`) and the multihash key (back-end → `base16`, `0-9a-f`) are
+deliberately *different encodings of the same bytes*. IPFS's CIDv1 default is
+`base32` — a different 32-char alphabet, `a`–`z` + `2`–`7`; `blob` picks the
+hex-flavoured `base32hex` (which extends base16hex) so CIDs read like hex.
 
 ## Content-addressable store (CAS)
 
