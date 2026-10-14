@@ -31,6 +31,7 @@ var (
 	s3Bucket    string
 	s3Region    string
 	outputPath  string
+	onlySize    bool
 	hashOnly    bool
 	listenAddr  string
 	httpUser    string
@@ -241,6 +242,7 @@ func main() {
 	}
 
 	getCmd.Flags().StringVarP(&outputPath, "output", "o", "", "output file path")
+	getCmd.Flags().BoolVarP(&onlySize, "only-size", "", false, "print only the blob size in bytes, do not retrieve the blob")
 
 	rootCmd.AddCommand(getCmd)
 
@@ -535,6 +537,11 @@ func runGet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer reader.Close()
+
+	if onlySize {
+		fmt.Println(size)
+		return nil
+	}
 
 	out, err := os.Create(outputPath)
 	if err != nil {
