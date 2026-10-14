@@ -11,6 +11,7 @@ const (
 	StorageDir  StorageType = "dir"
 	StorageSQL  StorageType = "sql"
 	StorageHTTP StorageType = "http"
+	StorageS3   StorageType = "s3"
 )
 
 // Mode is how a backend opens a store. It is the storage-layer analogue of an
@@ -81,7 +82,14 @@ type StorageBackend interface {
 	Close() error
 }
 
-func NewStorage(backend StorageType, path string, auth Auth, mode Mode) (StorageBackend, error) {
+// NewStorage opens a backend of the requested type in the given mode. `path`
+// is the per-backend store location (a local dir for dir, a database file for
+// sql, a base URL/endpoint for http and s3). `bucket` and `region` are used
+// only by the s3 backend (the named store and the SigV4 region) and are
+// ignored by the rest. `auth` are the explicit credentials the remote
+// backends apply (Basic-auth user/password for http, access/secret key for
+// s3; a no-op for dir and sql).
+func NewStorage(backend StorageType, path, bucket, region string, auth Auth, mode Mode) (StorageBackend, error) {
 	switch backend {
 	case StorageDir:
 		return NewDirStorage(path, mode)
@@ -94,6 +102,12 @@ func NewStorage(backend StorageType, path string, auth Auth, mode Mode) (Storage
 		// are the explicit credentials (from --user/--pass); when absent the
 		// http backend fills them from the URL's user:pass@ then ~/.netrc.
 		return NewHTTPStorage(path, auth, mode)
+	case StorageS3:
+		// For the s3 backend `path` is the S3/Ceph RGW endpoint (host:port or
+		// an http(s):// URL), `bucket` the named store within it, and `region`
+		// the SigV4 region (empty lets minio-go defer to the server's bucket
+		// location). `auth` carry the access key / secret.
+		return NewS3Storage(path, bucket, region, auth, mode)
 	default:
 		return nil, errors.New("unknown storage backend")
 	}

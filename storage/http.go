@@ -185,6 +185,17 @@ func notFound(err error) bool {
 	return errors.As(err, &he) && he.status == http.StatusNotFound
 }
 
+// rangeNotSatisfiable reports whether err is a 416 response to our Range request.
+// Per RFC 7233, a server is allowed to reject an unsatisfiable Range with 416;
+// in the current Peek this happens specifically when the object is shorter than
+// the requested range (or empty). We treat that as "nothing to return" rather
+// than a hard error, matching the contract's "fewer if the blob is shorter than n
+// / empty" and avoiding a class of spurious failures against strict servers.
+func rangeNotSatisfiable(err error) bool {
+	var he *httpError
+	return errors.As(err, &he) && he.status == http.StatusRequestedRangeNotSatisfiable
+}
+
 // closeBody closes resp.Body, discarding the close error (the body has already
 // been fully read, so a close error is not actionable); the explicit blank
 // assignment keeps errcheck quiet.
@@ -314,6 +325,14 @@ func (s *HTTPStorage) Peek(hash Digest, n int) ([]byte, error) {
 	if err != nil {
 		if notFound(err) {
 			return nil, errors.New("blob not found")
+		}
+		if rangeNotSatisfiable(err) {
+			// The object is shorter than the requested range (possibly empty);
+			// a spec-compliant server returns 416, which we treat as "0 bytes"
+			// per the Peek contract (fewer / possibly empty if the blob is
+			// shorter than n). Other backends may ignore Range and 200 the
+			// whole body, which is also within contract.
+			return nil, nil
 		}
 		return nil, err
 	}

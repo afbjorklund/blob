@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // sha256Multihash builds a well-formed sha2-256 multihash over data:
@@ -25,14 +26,15 @@ func sha256Multihash(data []byte) []byte {
 }
 
 // backendNames is the set of backends the shared tests run against, so the
-// dir, sql and http backends are held to the same contract.
+// dir, sql, http and s3 backends are held to the same contract.
 func backendNames() []StorageType {
-	return []StorageType{StorageDir, StorageSQL, StorageHTTP}
+	return []StorageType{StorageDir, StorageSQL, StorageHTTP, StorageS3}
 }
 
 // pathFor maps a backend type to the path NewStorage expects under dir: a
 // directory for the dir backend, a database file for the sql backend. (The http
-// backend takes a base URL, so its path is resolved separately in the tests.)
+// backend takes a base URL, and the s3 backend takes an endpoint URL, so their
+// paths are resolved separately in the tests.)
 func pathFor(backend StorageType, dir string) string {
 	if backend == StorageSQL {
 		return filepath.Join(dir, "store.db")
@@ -40,13 +42,104 @@ func pathFor(backend StorageType, dir string) string {
 	return dir
 }
 
-func mustNew(t *testing.T, backend StorageType, path string, mode Mode) StorageBackend {
+// s3TestBucket is the (fixed) bucket name the in-process S3 shim serves and the
+// s3 backend is pointed at in the tests — the tests never exercise bucket
+// selection, only object ops within a named bucket.
+const s3TestBucket = "testbucket"
+
+func mustNew(t *testing.T, backend StorageType, path, bucket string, mode Mode) StorageBackend {
 	t.Helper()
-	b, err := NewStorage(backend, path, Auth{}, mode)
+	region := ""
+	if backend == StorageS3 {
+		// Pin a region so minio-go does not attempt a bucket `?location`
+		// lookup — the in-process s3 test server does not serve one. (A real
+		// deployment either serves it or overrides via BLOB_S3_REGION.)
+		region = "us-east-1"
+	}
+	b, err := NewStorage(backend, path, bucket, region, Auth{}, mode)
 	if err != nil {
-		t.Fatalf("NewStorage(%s, %q, %v): %v", backend, path, mode, err)
+		t.Fatalf("NewStorage(%s, %q, %q, %q, %v): %v", backend, path, bucket, region, mode, err)
 	}
 	return b
+}
+
+// newS3TestServer starts an in-process httptest server speaking just enough of
+// the S3 object model for a single bucket (s3TestBucket) to run the shared
+// storage contract tests without a Ceph RGW or AWS account. Because all test
+// blobs are small (well under minio-go's 16 MiB single-PUT threshold), the
+// backend's Put / Index arrive as plain `PUT /<bucket>/<key>`, and Get /
+// Lookup / Peek as ranged or full `GET`/`HEAD`. minio-go maps a 404 with no
+// S3-XML body to Code NoSuchKey on its own, so a plain 404 here is enough to
+// mean "not found" — no S3 error XML is required.
+//
+// The same in-mem store is shared for the whole subtest (like the http one), so
+// the read/rewind steps that reopen a backend still see the same objects.
+func newS3TestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	var mu sync.Mutex
+	objects := map[string][]byte{}
+
+	handle := func(w http.ResponseWriter, r *http.Request) {
+		remaining := strings.TrimPrefix(r.URL.Path, "/")
+		bucket, key, ok := strings.Cut(remaining, "/")
+		if !ok || bucket != s3TestBucket {
+			http.Error(w, "bucket not found", http.StatusNotFound)
+			return
+		}
+
+		get := func() ([]byte, bool) {
+			mu.Lock()
+			defer mu.Unlock()
+			b, found := objects[key]
+			return b, found
+		}
+
+		switch r.Method {
+		case http.MethodPut:
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			objects[key] = body
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet, http.MethodHead:
+			b, found := get()
+			if !found {
+				http.Error(w, "no such key", http.StatusNotFound)
+				return
+			}
+			// Honor `Range` in the S3-compliant way: when the object is shorter
+			// than the requested range (or empty) the range is unsatisfiable
+			// → 416 (S3 `InvalidRange`). Peek in s3.go treats that as "0
+			// bytes" per contract. We match the http shim on this so both
+			// backends are held to the same server behavior.
+			if r.Method == http.MethodGet && r.Header.Get("Range") != "" && len(b) == 0 {
+				http.Error(w, "invalid range", http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			// minio-go's response parser expects Last-Modified on GET/HEAD
+			// responses; emit a well-formed RFC 7231 time.
+			w.Header().Set("Last-Modified", nowRFC1123())
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(b)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(handle))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 // newHTTPTestServer starts an in-memory httptest server implementing the
@@ -115,6 +208,14 @@ func newHTTPTestServer(t *testing.T) *httptest.Server {
 				http.Error(w, "blob not found", http.StatusNotFound)
 				return
 			}
+			// Honor a bare `Range: bytes=0-…` request in the way a compliant
+			// server does: unsatisfiable range → 416 (see Peek in http.go). This
+			// is the one Range shape the backend asks for, and the one case we
+			// specifically assert against an empty blob in TestRoundTrip.
+			if r.Header.Get("Range") != "" && len(b) == 0 {
+				http.Error(w, "requested range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 			w.WriteHeader(http.StatusOK)
@@ -145,6 +246,12 @@ func isIndexPath(target string) bool {
 	return strings.HasPrefix(target, indexPrefix+"/")
 }
 
+// nowRFC1123 is an RFC 7231 HTTP date (e.g. for Last-Modified): the format
+// minio-go's response parsers expect on S3 GET/HEAD responses.
+func nowRFC1123() string {
+	return time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT")
+}
+
 // TestRoundTrip exercises the full read/write contract of every backend:
 // Put/Has/Get round-trips (including an empty value), Index/Lookup with
 // last-add-wins, Peek, persistence across reopening, and the read-only guard
@@ -158,10 +265,15 @@ func TestRoundTrip(t *testing.T) { //nolint:gocyclo
 		t.Run(string(backend), func(t *testing.T) {
 			dir := t.TempDir()
 			path := pathFor(backend, dir)
+			bucket := ""
 			if backend == StorageHTTP {
 				// One shared in-memory server for the whole subtest, so the
 				// store persists across the reopen steps below.
 				path = newHTTPTestServer(t).URL
+			}
+			if backend == StorageS3 {
+				path = newS3TestServer(t).URL
+				bucket = s3TestBucket
 			}
 
 			big := make([]byte, 4<<10)
@@ -176,7 +288,7 @@ func TestRoundTrip(t *testing.T) { //nolint:gocyclo
 				{key: []byte("key-3"), value: nil}, // empty value
 			}
 
-			w := mustNew(t, backend, path, ReadWrite)
+			w := mustNew(t, backend, path, bucket, ReadWrite)
 			for _, e := range entries {
 				if err := w.Put(e.key, int64(len(e.value)), bytes.NewReader(e.value)); err != nil {
 					t.Fatalf("Put(%q): %v", e.key, err)
@@ -248,7 +360,7 @@ func TestRoundTrip(t *testing.T) { //nolint:gocyclo
 			}
 
 			// Persistence: reopen read-write and the data is still there.
-			w2 := mustNew(t, backend, path, ReadWrite)
+			w2 := mustNew(t, backend, path, bucket, ReadWrite)
 			if ok, err := w2.Has(wrtKey); err != nil || !ok {
 				t.Fatalf("Has after reopen = %v, %v; want true, nil", ok, err)
 			}
@@ -257,7 +369,7 @@ func TestRoundTrip(t *testing.T) { //nolint:gocyclo
 			}
 
 			// Read-only: reads work, writes are refused.
-			ro := mustNew(t, backend, path, ReadOnly)
+			ro := mustNew(t, backend, path, bucket, ReadOnly)
 			if ok, err := ro.Has(wrtKey); err != nil || !ok {
 				t.Fatalf("read-only Has = %v, %v; want true, nil", ok, err)
 			}
@@ -288,8 +400,13 @@ func TestConcurrentReads(t *testing.T) {
 		t.Run(string(backend), func(t *testing.T) {
 			dir := t.TempDir()
 			path := pathFor(backend, dir)
+			bucket := ""
 			if backend == StorageHTTP {
 				path = newHTTPTestServer(t).URL
+			}
+			if backend == StorageS3 {
+				path = newS3TestServer(t).URL
+				bucket = s3TestBucket
 			}
 
 			payload := make([]byte, 2<<20)
@@ -299,7 +416,7 @@ func TestConcurrentReads(t *testing.T) {
 
 			// Seed one big blob keyed by its (properly-sized) multihash and index it.
 			key := sha256Multihash(payload)
-			w := mustNew(t, backend, path, ReadWrite)
+			w := mustNew(t, backend, path, bucket, ReadWrite)
 			if err := w.Put(key, int64(len(payload)), bytes.NewReader(payload)); err != nil {
 				t.Fatal(err)
 			}
@@ -310,7 +427,7 @@ func TestConcurrentReads(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			ro := mustNew(t, backend, path, ReadOnly)
+			ro := mustNew(t, backend, path, bucket, ReadOnly)
 			defer ro.Close()
 
 			// A writer adds distinct new blobs concurrently with the readers; the
@@ -319,7 +436,7 @@ func TestConcurrentReads(t *testing.T) {
 			// `ro` stays read-only: the sql backend does this in WAL mode (readers
 			// unblocked by a writer), the dir backend by writing a fresh file per
 			// key.
-			writer := mustNew(t, backend, path, ReadWrite)
+			writer := mustNew(t, backend, path, bucket, ReadWrite)
 			defer writer.Close()
 
 			const writerBlobs = 8
@@ -432,7 +549,7 @@ func TestHTTPAuth(t *testing.T) {
 	body := bytes.NewReader([]byte("blob"))
 
 	// No credentials -> 401, and the message is the terse hint, NOT the HTML.
-	b := mustNew(t, StorageHTTP, srv.URL, ReadWrite)
+	b := mustNew(t, StorageHTTP, srv.URL, "", ReadWrite)
 	defer b.Close()
 	if err := b.Put(key, 4, body); err == nil {
 		t.Fatal("Put without auth: expected 401 error, got nil")

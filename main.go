@@ -28,6 +28,8 @@ import (
 var (
 	storageType string
 	storagePath string
+	s3Bucket    string
+	s3Region    string
 	outputPath  string
 	hashOnly    bool
 	listenAddr  string
@@ -55,6 +57,18 @@ func defaultHTTPUser() string {
 
 func defaultHTTPPass() string {
 	return os.Getenv("BLOB_PASS")
+}
+
+func defaultS3Bucket() string {
+	return os.Getenv("BLOB_BUCKET")
+}
+
+// defaultS3Region is empty so the caller can leave it unset and minio-go
+// defers to the server's bucket location (Ceph RGW accepts a common default
+// like us-east-1, but an explicit region override is the more general
+// answer — see BACKEND.md).
+func defaultS3Region() string {
+	return os.Getenv("BLOB_S3_REGION")
 }
 
 // resolveCLIAuth decides which Basic-auth credentials (if any) the http backend
@@ -192,10 +206,12 @@ func main() {
 		SilenceUsage:  true,
 	}
 
-	rootCmd.PersistentFlags().StringVarP(&storageType, "storage", "s", defaultStorageType(), "storage backend (dir, sql, or http)")
-	rootCmd.PersistentFlags().StringVarP(&storagePath, "path", "p", defaultStoragePath(), "storage path (local dir for dir/sql; base URL for http)")
-	rootCmd.PersistentFlags().StringVarP(&httpUser, "user", "u", defaultHTTPUser(), "http backend Basic-auth user (or BLOB_USER, or user:pass@ in --path)")
-	rootCmd.PersistentFlags().StringVar(&httpPass, "pass", defaultHTTPPass(), "http backend Basic-auth password/token (or BLOB_PASS, or the pass in user:pass@ --path)")
+	rootCmd.PersistentFlags().StringVarP(&storageType, "storage", "s", defaultStorageType(), "storage backend (dir, sql, http, or s3)")
+	rootCmd.PersistentFlags().StringVarP(&storagePath, "path", "p", defaultStoragePath(), "storage path (local dir for dir/sql; base URL for http; endpoint (host:port or http(s):// URL) for s3)")
+	rootCmd.PersistentFlags().StringVarP(&s3Bucket, "bucket", "b", defaultS3Bucket(), "s3 backend bucket name (or BLOB_BUCKET)")
+	rootCmd.PersistentFlags().StringVarP(&s3Region, "region", "r", defaultS3Region(), "s3 backend SigV4 region (or BLOB_S3_REGION; unset defers to the server)")
+	rootCmd.PersistentFlags().StringVarP(&httpUser, "user", "u", defaultHTTPUser(), "remote backend credentials: Basic-auth user for http, access key for s3 (or BLOB_USER, or user:pass@ in --path)")
+	rootCmd.PersistentFlags().StringVar(&httpPass, "pass", defaultHTTPPass(), "remote backend credentials: Basic-auth password/token for http, secret key for s3 (or BLOB_PASS, or the pass in user:pass@ --path)")
 
 	addCmd := &cobra.Command{
 		Use:   "add <file>",
@@ -565,10 +581,11 @@ func runLookup(cmd *cobra.Command, args []string) error {
 // getStorageBackend opens a backend in the requested mode and returns it for
 // single use (the caller must Close). mode distinguishes the CLI write path
 // (add, which needs to write) from the read path (get / lookup, which only
-// reads and so should not create or mutate the store). The resolved Basic-auth
-// credentials ride along for the http backend (a no-op for dir and sql).
+// reads and so should not create or mutate the store). The resolved credentials
+// and S3 bucket/region ride along for the remote backends (no-ops for dir and
+// sql).
 func getStorageBackend(mode storage.Mode) (storage.StorageBackend, error) {
-	return storage.NewStorage(storage.StorageType(storageType), storagePath, resolveCLIAuth(), mode)
+	return storage.NewStorage(storage.StorageType(storageType), storagePath, s3Bucket, s3Region, resolveCLIAuth(), mode)
 }
 
 // runServe starts a read-only HTTP gateway for the store, so a stable
