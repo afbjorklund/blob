@@ -179,10 +179,53 @@ is addressed*; they differ in *how content is found and fetched*:
   it is.
 
 So relative to the other two: `blob` drops IPFS's discovery + signed names and
-ORAS's registry protocol + manifest, and in return is just *address, store,
-serve* — no network to bootstrap, no registry to deploy, no keys to sign with.
-The content is addressed exactly like in the others; you're only opting out of
-how it travels.
+ORAS's registry protocol (push/pull to a live registry), and in return is just
+*address, store, serve* — no network to bootstrap, no registry to deploy, no
+keys to sign with. The content is addressed exactly like in the others;
+you're only opting out of how it travels. (`blob` does read and write *OCI
+layouts* themselves — see the next section — just without the registry behind
+them.)
+
+## OCI, the closest cousin
+
+One row of that table deserves its own explanation, because it is the one other
+scheme that is *also content-addressed and also has a mutable name on top*:
+`oras://`. So it may seem odd that `blob` doesn't use the same OCI manifests
+and layouts as ORAS does. And it isn't odd at all — OCI lays out the same
+content-addressing idea `blob` is built on, just with the vocabulary of the
+container ecosystem:
+
+- **OCI digest** (`sha256:<hex>`) ≈ **store blob key** (a multihash over the
+  same 32 bytes). One is a human-readable "algorithm:hex" name, the other is
+  the same hex bytes with a 2-byte algorithm tag (a multihash). They name the
+  same content; they differ in presentation, not in what they identify.
+- **OCI layout** (`oci-layout` + `index.json` + `blobs/sha256/<hex>`) ≈ a
+  **name → index → a set of blobs** mapping. `index.json` is a small JSON
+  document naming a manifest, which names a config and several layers —
+  each one a plain content blob, addressed by its digest. A `blob oci add`
+  just walks that list and stores each blob in the CAS; `blob oci get`
+  reconstructs the same list of blobs.
+- **OCI tag / name** ≈ `blob`'s **name index** (one name points at one
+  entry, last-write-wins). The one deliberate difference is that a *real*
+  OCI registry holds a mutable `index.json` (shared, mutable) while `blob`
+  records one *name → one index* link per name (each name is an atomic
+  single-key write, no read-modify-write of a shared document). Same idea,
+  same direction (name → content → set of blobs), different scale of
+  mutation.
+
+So `blob` is not an "OCI store" — it is a *blob store that happens to speak
+OCI on the wire*. That means:
+
+- an OCI layout can be imported / exported without re-hashing anything
+  (the digests line up with the multihashes),
+- and an OCI layout can be stored with all the benefits of this store (CAS,
+  backend choice, read-only serve) that a registry wouldn't give.
+
+That is the whole OCI story, conceptually. No registry protocol, no tag
+semantics, no auth — just: read a layout, write the same layout back. That is
+why it is a small set of sub-packages (`identity` for the digest⇄multihash
+bridge, `oci` for the layout, `cid` for the store's CID conventions) and not
+a registry client.
 
 ## What this is not
 

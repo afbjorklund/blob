@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,12 +14,10 @@ import (
 	"syscall"
 	"time"
 
+	"blob/cid"
+	"blob/identity"
 	"blob/storage"
 
-	"github.com/ipfs/go-cid"
-	"github.com/multiformats/go-multibase"
-	"github.com/multiformats/go-multicodec"
-	"github.com/multiformats/go-multihash"
 	"github.com/spf13/cobra"
 )
 
@@ -36,6 +32,8 @@ var (
 	listenAddr  string
 	httpUser    string
 	httpPass    string
+	// OCI import/export
+	ociName string
 )
 
 func defaultStorageType() string {
@@ -275,57 +273,29 @@ func main() {
 
 	rootCmd.AddCommand(serveCmd)
 
+	registerOCICmds(rootCmd)
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func supportedCodecs() map[uint64]bool {
-	return map[uint64]bool{
-		uint64(multicodec.Raw):  true,
-		uint64(multicodec.Json): true,
-	}
-}
-
-func codecName(code uint64) string {
-	return multicodec.Code(code).String()
-}
-
-func computeHash(filePath string) (multihash.Multihash, error) {
+// computeHash returns the Identity (multihash bytes) of a file, computed by
+// streaming (content -> key). The OCI path uses identity.FromOCI instead,
+// bridging from an existing OCI digest.
+func computeHash(filePath string) (identity.Identity, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, file); err != nil {
-		return nil, err
-	}
-
-	mh, err := multihash.Encode(h.Sum(nil), multihash.SHA2_256)
-	if err != nil {
-		return nil, err
-	}
-
-	return mh, nil
+	return identity.HashReader(file)
 }
 
-// codecForFirstByte picks the content-based codec (DESIGN.md) from the
-// blob's first byte: Json if it is '{' or '[', otherwise Raw. An empty
-// blob (first byte 0) is Raw — we do not expect one, but this is the
-// guard that keeps us from crashing on it.
-func codecForFirstByte(first byte) multicodec.Code {
-	if first == '{' || first == '[' {
-		return multicodec.Json
-	}
-	return multicodec.Raw
-}
-
-// detectCodec derives the codec a file would be stored under by peeking
-// its first byte.
-func detectCodec(filePath string) (multicodec.Code, error) {
+// detectCodec derives the codec a file would be stored under by peeking its
+// first byte (the content-based rule, see cid.CodecForFirstByte).
+func detectCodec(filePath string) (cid.Code, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return 0, err
@@ -337,11 +307,10 @@ func detectCodec(filePath string) (multicodec.Code, error) {
 	if err != nil && err != io.EOF {
 		return 0, err
 	}
-
 	if n == 0 {
-		return multicodec.Raw, nil
+		return cid.CodeRaw, nil
 	}
-	return codecForFirstByte(buf[0]), nil
+	return cid.CodecForFirstByte(buf[0]), nil
 }
 
 // peekFirstByte returns the blob's first byte (0 when empty) without
@@ -357,53 +326,29 @@ func peekFirstByte(backend storage.StorageBackend, digest storage.Digest) (byte,
 	return b[0], nil
 }
 
-// cidForDigest derives the CID of a *stored* blob from its digest
-// (multihash) by peeking the first byte and applying the same
-// content-based codec rule as `add`/`hash`, then composing the CID
-// (version + codec + multihash). It reads only that single byte, so it
-// is constant work regardless of blob size and never re-hashes — a name
-// resolves to the exact CID that `add` printed.
-func cidForDigest(backend storage.StorageBackend, digest storage.Digest) (cid.Cid, error) {
-	first, err := peekFirstByte(backend, digest)
+// cidForDigest derives the CID of a *stored* blob from its identity by peeking
+// the first byte (the content-based codec rule) and composing the CID. It
+// reads only a single byte, so it is constant work regardless of blob size and
+// never re-hashes — a name resolves to the exact CID that `add` printed.
+func cidForDigest(backend storage.StorageBackend, d storage.Digest) (cid.Cid, error) {
+	first, err := peekFirstByte(backend, d)
 	if err != nil {
-		return cid.Undef, err
+		return cid.Cid{}, err
 	}
-
-	mc := codecForFirstByte(first)
-	mh := multihash.Multihash(digest)
-	return cid.NewCidV1(uint64(mc), mh), nil
+	return cid.Build(cid.CodecForFirstByte(first), identity.Identity(d)), nil
 }
 
-// computeCID builds a CIDv1 from a multihash and a codec.
-func computeCID(mh multihash.Multihash, mc multicodec.Code) (cid.Cid, error) {
-	return cid.NewCidV1(uint64(mc), mh), nil
-}
-
-// stringFromCID renders a CID as the user-facing base32hex string
-// (this store's presentation choice, see DESIGN.md).
-func stringFromCID(c cid.Cid) (string, error) {
-	return c.StringOfBase(multibase.Base32hex)
-}
-
+// digestFromCID returns the storage key for c, validating that the CID carries
+// a codec the store holds (raw / json) and a hash identity understands (SHA-2
+// 256 today).
 func digestFromCID(c cid.Cid) (storage.Digest, error) {
-	if !supportedCodecs()[c.Type()] {
-		return nil, fmt.Errorf("unsupported codec %q: this store only holds %q",
-			codecName(c.Type()), "raw and json")
+	if !cid.Supported(cid.Codec(c)) {
+		return nil, fmt.Errorf("unsupported codec %q: this store only holds raw and json", cid.CodecName(cid.Codec(c)))
 	}
-
-	mh := c.Hash()
-	decoded, err := multihash.Decode(mh)
-	if err != nil {
+	if _, err := identity.DigestBytes(identity.Identity(c.Hash())); err != nil {
 		return nil, err
 	}
-
-	if decoded.Code != multihash.SHA2_256 {
-		return nil, fmt.Errorf("unsupported hash algorithm: %d", decoded.Code)
-	}
-
-	// The storage key is the multihash itself (algorithm + digest),
-	// self-describing.
-	return mh, nil
+	return storage.Digest(c.Hash()), nil
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
@@ -429,11 +374,8 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	c, err := computeCID(mh, mc)
-	if err != nil {
-		return err
-	}
-	cidStr, err := stringFromCID(c)
+	c := cid.Build(mc, mh)
+	cidStr, err := cid.Render(c)
 	if err != nil {
 		return err
 	}
@@ -443,7 +385,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	digest := storage.Digest(c.Hash())
+	digest := cid.Key(c)
 
 	backend, err := getStorageBackend(storage.ReadWrite)
 	if err != nil {
@@ -494,11 +436,8 @@ func runHash(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	c, err := computeCID(mh, mc)
-	if err != nil {
-		return err
-	}
-	cidStr, err := stringFromCID(c)
+	c := cid.Build(mc, mh)
+	cidStr, err := cid.Render(c)
 	if err != nil {
 		return err
 	}
@@ -517,6 +456,9 @@ func resolveDigest(arg string) (storage.Digest, error) {
 			return nil, err
 		}
 		return digest, nil
+	}
+	if id, err := identity.FromOCIString(arg); err == nil {
+		return id, nil
 	}
 
 	backend, err := getStorageBackend(storage.ReadOnly)
@@ -620,7 +562,7 @@ func runLookup(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	cidStr, err := stringFromCID(c)
+	cidStr, err := cid.Render(c)
 	if err != nil {
 		return err
 	}
@@ -726,20 +668,15 @@ func serveBlob(w http.ResponseWriter, r *http.Request, backend storage.StorageBa
 	}
 	defer reader.Close()
 
-	decoded, err := multihash.Decode(c.Hash())
+	contentDigest, err := cid.ContentDigestHeader(c)
 	if err != nil {
 		http.Error(w, "invalid multihash", http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Digest", "sha-256="+base64.StdEncoding.EncodeToString(decoded.Digest))
+	w.Header().Set("Content-Digest", contentDigest)
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-
-	if c.Type() == uint64(multicodec.Json) {
-		w.Header().Set("Content-Type", "application/json")
-	} else {
-		w.Header().Set("Content-Type", "application/octet-stream")
-	}
+	w.Header().Set("Content-Type", cid.MediaType(c))
 
 	w.WriteHeader(http.StatusOK)
 
@@ -768,7 +705,7 @@ func serveName(w http.ResponseWriter, r *http.Request, backend storage.StorageBa
 		return
 	}
 
-	cidStr, err := stringFromCID(c)
+	cidStr, err := cid.Render(c)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

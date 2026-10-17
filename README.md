@@ -1,6 +1,6 @@
 # blob
 
-A content-addressable blob store (CAS) using CID (Content ID) addressing, similar to `ipfs` but local-only, with pluggable storage backends.
+A content-addressable blob store (CAS) using CID (Content ID) addressing, similar to `ipfs` but local-only, with pluggable storage backends — and OCI import/export (images and artifacts, from the layouts `docker save`/`podman save` produce).
 
 See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
 
@@ -8,6 +8,7 @@ See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
 
 - **Content addressing with dedup** - files are stored by their content hash (CIDv1, base32hex encoding), so identical content is stored only once, no matter how many times it is added and under which names
 - **Content-based codec** - the CID's codec byte is chosen from the content, not the extension: files starting with `{` or `[` are stored as the `Json` codec, everything else as `Raw` (see [DESIGN.md](DESIGN.md) for the rationale)
+- **OCI import / export** - `oci import` reads a modern OCI layout (a directory, or a `docker save`/`podman save` tar — the v25+ "hybrid" is read by its OCI half) or wraps a bare file as a single-layer OCI **artifact**, storing every reachable blob; `oci export` writes the layout back out (dir or tar) byte-for-byte. Digests in OCI (`sha256:<hex>`) are the same bytes as the store's sha2-256 multihash, so an OCI import and a plain `add` of identical content deduplicate for free. `oci add`/`oci get` work as aliases. No registry I/O — local layouts only (see [DESIGN.md](DESIGN.md))
 - **Pluggable storage backends**:
   - Directory (`--path` dir; files sharded across up to 3 one-byte fanout levels: `<byte0>/<byte1>/<byte2>/<rest of hex>`, e.g. `12/20/...`)
   - SQLite (single database file at `--path`)
@@ -72,6 +73,28 @@ Not required (the CID is on disk / in the index), but handy:
 blob lookup ubuntu_latest.sif
 v05ah4859p5vrofmfpdv5i8om998c9k4gd0ge2shctr5jofc6ufj3ghgf8k
 ```
+
+### OCI import / export
+
+Import and export OCI layouts (images and artifacts). Input is the local OCI layout that `docker save`/`podman save` produce — a directory, or a tar (including the v25+ "hybrid" that is both a docker archive and an OCI archive; the OCI half is read, the docker half ignored). A bare file is wrapped as a single-layer OCI artifact.
+
+```bash
+# Import an OCI layout (dir or tar) — stores the reachable blobs, names it:
+blob oci import oci-save/busybox       # a directory layout
+blob oci import busybox.tar            # a docker/podman save tar (hybrid OK)
+
+# Import a bare file as a single-layer OCI artifact (config = {}, one layer):
+blob oci import myapp.sif --name myapp
+
+# Export a stored layout back out to a directory or a tar:
+blob oci export busybox -o oci-out     # directory (oci-layout/ + index.json/ + blobs/)
+blob oci export busybox -o busybox.tar # tar archive
+
+# List a stored layout's index, manifests, config and layers (read-only):
+blob oci ls busybox
+```
+
+`oci import` and `oci export` are the primary verbs; `oci add`/`oci get` work as aliases to match the rest of the CLI. Digests on the two sides are the *same bytes* (`sha256:<hex>` ≡ the store's sha2-256 multihash), so content imported via OCI is the same CAS entry as the identical content added with `add` — it deduplicates for free. There is no registry I/O (no `docker://`/`oras://` pull, no tags): in and out are local layouts.
 
 ### HTTP gateway
 
