@@ -184,6 +184,36 @@ part of the SigV4 signature (e.g. `--region us-west-2`).
 For more on the S3 API / SigV4, see the AWS S3 docs (https://aws.amazon.com/s3/)
 or MinIO (https://min.io/docs/minio/).
 
+## Smoke tests
+
+Each backend has an opt-in end-to-end test that runs against a real target and
+skips otherwise, so `go test ./...` stays green in a sandbox. The in-process
+shims (in-memory `httptest` servers) already cover the protocol shape, so the
+smoke tests exist to verify the *real* thing: network round-trips, a real
+filesystem under the `dir` backend, real SigV4 signing for `s3`, etc.
+
+| test          | env var           | verifies                                                   |
+|---------------|-------------------|------------------------------------------------------------|
+| `TestDirSmoke`  | `BLOB_DIR_PATH`   | a real directory: plain fs, NFS/CIFS, FUSE (rclone, sshfs, …) |
+| `TestHTTPSmoke` | `BLOB_HTTP_PATH`  | a real HTTP server speaking the on-wire contract above     |
+| `TestS3Smoke`   | `BLOB_S3_ENDPOINT` + `BLOB_S3_BUCKET` | a real S3 / Ceph RGW endpoint (creds via `BLOB_USER`/`BLOB_PASS`) |
+
+All three check the same contract: `Put` → `Peek` (first bytes) → name
+`Index`/`Lookup` round-trip with last-add-wins re-point → the read-only guard
+rejecting writes → `Has`/`Get` full read-back.
+
+```bash
+BLOB_DIR_PATH=/mnt/nfs/blobstore \
+    go test -v -run TestDirSmoke ./storage/
+
+BLOB_HTTP_PATH=http://blob.localhost:8080 BLOB_USER=blob BLOB_PASS=<pass> \
+    go test -v -run TestHTTPSmoke ./storage/
+
+BLOB_S3_ENDPOINT=127.0.0.1:7480 BLOB_S3_BUCKET=blobstore \
+BLOB_USER=<access> BLOB_PASS=<secret> \
+    go test -v -run TestS3Smoke ./storage/
+```
+
 ## What the *gateway* is (not a server you set up)
 
 `blob serve` is different from the `http` backend: it is a **read-only,
