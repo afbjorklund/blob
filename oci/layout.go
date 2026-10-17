@@ -216,6 +216,13 @@ func (t *TarFileSource) Has(d Digest) (bool, error) {
 	return ok, nil
 }
 
+// HasEntry reports whether the tar contains a regular-file entry with the
+// given name (e.g. "manifest.json" — the marker of a legacy docker archive).
+func (t *TarFileSource) HasEntry(name string) bool {
+	_, ok := t.entries[path.Clean(name)]
+	return ok
+}
+
 // Get streams the entry for d by seeking to its recorded data offset.
 func (t *TarFileSource) Get(d Digest) (io.ReadCloser, int64, error) {
 	name := entryName(d)

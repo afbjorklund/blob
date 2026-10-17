@@ -153,7 +153,12 @@ func ParseIndex(r io.Reader) (*Index, error) {
 	if err := json.NewDecoder(r).Decode(&idx); err != nil {
 		return nil, err
 	}
-	if idx.MediaType != "" && idx.MediaType != MediaTypeImageIndex {
+	if idx.MediaType == "" {
+		// Some producers (e.g. `podman save -f oci`) omit the index media
+		// type; the layout role is fixed, so normalise to the image index.
+		idx.MediaType = MediaTypeImageIndex
+	}
+	if idx.MediaType != MediaTypeImageIndex {
 		return nil, fmt.Errorf("oci: not an image index: mediaType %q", idx.MediaType)
 	}
 	if len(idx.Manifests) == 0 {

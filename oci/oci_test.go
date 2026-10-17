@@ -346,6 +346,15 @@ func TestTarFileSource(t *testing.T) {
 		t.Errorf("IndexBytes = %q, want %q", ib, index)
 	}
 
+	// The docker half is visible by name — main's legacy-archive warning
+	// relies on this — while the index-based path ignores it.
+	if !src.HasEntry("manifest.json") || !src.HasEntry("repositories") {
+		t.Errorf("HasEntry: legacy docker markers not found")
+	}
+	if src.HasEntry("index.json") == false || src.HasEntry("blobs/sha256/x") {
+		t.Errorf("HasEntry: expected index.json present, blob path absent")
+	}
+
 	// The layer (a reachable blob) must be present and readable.
 	have, err := src.Has(layerD)
 	if err != nil || !have {
@@ -371,6 +380,32 @@ func writeTarEntry(t *testing.T, tw *tar.Writer, name string, data []byte) {
 	if _, err := tw.Write(data); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestParseIndexDefaultsMediaType(t *testing.T) {
+	// `podman save -f oci` writes an index.json with no mediaType.
+	b := []byte(`{"schemaVersion":2,"manifests":[{"digest":"sha256:` + make64('a') + `","size":1}]}`)
+	idx, err := ParseIndex(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx.MediaType != MediaTypeImageIndex {
+		t.Errorf("MediaType = %q, want %q", idx.MediaType, MediaTypeImageIndex)
+	}
+
+	// A present-but-wrong media type is still rejected.
+	bad := []byte(`{"schemaVersion":2,"mediaType":"application/x","manifests":[{"digest":"sha256:` + make64('a') + `"}]}`)
+	if _, err := ParseIndex(bytes.NewReader(bad)); err == nil {
+		t.Error("ParseIndex: expected error for foreign mediaType")
+	}
+}
+
+func make64(c byte) string {
+	s := make([]byte, 64)
+	for i := range s {
+		s[i] = c
+	}
+	return string(s)
 }
 
 func mustParseIndex(t *testing.T, b []byte) *Index {

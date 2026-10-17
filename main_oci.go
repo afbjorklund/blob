@@ -169,6 +169,15 @@ func openLayoutSource(arg string) (layoutSource, error) {
 		if _, err := src.IndexBytes(); err == nil {
 			return src, nil
 		}
+		// A manifest.json without an index.json is a legacy docker archive
+		// (e.g. `podman save` with no -f). We do not import that format's
+		// per-blob structure — warn and fall through to the single-blob wrap.
+		if src.HasEntry("manifest.json") {
+			_, _ = fmt.Fprintf(os.Stderr,
+				"warning: %s is a legacy docker archive (manifest.json, no OCI index): importing it as a single blob (wrapped as an OCI artifact)\n"+
+					"  for per-layer import, save it in OCI form first: `podman save -f oci` or docker v25+\n",
+				arg)
+		}
 	}
 	_ = f.Close()
 
