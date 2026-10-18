@@ -221,11 +221,17 @@ OCI on the wire*. That means:
 - and an OCI layout can be stored with all the benefits of this store (CAS,
   backend choice, read-only serve) that a registry wouldn't give.
 
-That is the whole OCI story, conceptually. No registry protocol, no tag
-semantics, no auth — just: read a layout, write the same layout back. That is
-why it is a small set of sub-packages (`identity` for the digest⇄multihash
-bridge, `oci` for the layout, `cid` for the store's CID conventions) and not
-a registry client.
+That is the whole OCI story, conceptually. No push, no tag map, no auth, no
+HTTPS — but the `serve` command *does* speak the OCI distribution **read** API
+(`/v2/<repo>/manifests/<ref>`, `/v2/<repo>/blobs/<sha256:...>`), with the
+repository name being the very CID `oci import` printed (primary) or a stored
+name (secondary). The only tag is `latest`; inner components are still
+addressed by their `sha256:` digest. This is a *read-only registry endpoint*
+on the same backend `serve` already exposes — stock clients (podman, skopeo,
+oras, buildkit) can pull a layout in one shot, no `oci export` step needed.
+That is why `oci` is a small set of sub-packages (`identity` for the
+digest⇄multihash bridge, `oci` for the layout, `cid` for the store's CID
+conventions) and not a full registry implementation.
 
 ## What this is not
 

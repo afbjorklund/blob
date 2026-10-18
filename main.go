@@ -610,6 +610,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux.HandleFunc("/name/", func(w http.ResponseWriter, r *http.Request) {
 		serveName(w, r, backend, r.URL.Path[len("/name/"):])
 	})
+	// /v2/ is the OCI distribution read surface (see main_oci_serve.go): a layout
+	// already in the store can be pulled by stock OCI clients (podman, oras,
+	// skopeo, buildkit) with no `oci export` step. It is a distinct path prefix
+	// from /blob/ and /name/, so the mux disambiguates by prefix and the three
+	// namespaces never shadow each other.
+	mux.Handle("/v2/", ociV2Handler(backend))
 
 	srv := &http.Server{Addr: listenAddr, Handler: mux}
 

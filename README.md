@@ -16,6 +16,7 @@ See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
   - S3 (`--path` endpoint URL, `--bucket` name; primary target Ceph RADOS Gateway; a thin S3-object proxy, blobs at `<bucket>/<hex>`)
 - **Streaming I/O** - Files are streamed to and from the backend without materializing the entire blob in memory. The `sqlite` backend reads via SQLite's blob API (`db.OpenBlob` in a read-only handle) instead of loading the whole row
 - **Read-only HTTP gateway** - A built-in `blob serve` command (like the IPFS HTTP gateway, but for this local store) serves `GET /blob/<CID>`, so a stable `blob://<CID>` scheme can be mapped to `http://<host>/blob/<CID>` without the client knowing the backend or storage path. Response carries `Content-Type` (from the CID codec), `Content-Length`, and `Content-Digest: sha-256=…` (the stored multihash digest). `GET /name/<name>` resolves the name and `302`-redirects to the canonical `/blob/<CID>`
+- **OCI distribution registry (pull)** - `blob serve` also speaks the OCI distribution *read* API under `/v2/`, so an already-imported layout can be pulled by stock clients (`podman pull docker://…`, `oras pull oras://…`, `skopeo`, buildkit) with no `oci export` step. The repository name is the CID the store already printed: `docker://host/blob/<CID>` (primary, the exact CID from `oci import`) or `docker://host/name/<name>` (secondary, the name index). The only tag is `latest` (→ the layout index); inner components are addressed by their `sha256:<hex>` digest, exactly as the OCI spec expects. Read-only (no push), no auth/HTTPS — treat the base as a trusted plain-HTTP registry (localhost by default)
 - **Name index** - A separate per-name index in each backend (symlink in the dir backend, foreign-keyed table in the sql backend, an `index/<name>` object holding the hash in the http backend) lets you resolve a name to the exact stored blob CID (e.g. `ubuntu_latest.sif` and `ubuntu_26.04.sif` both resolve to the same blob). Last add wins, so `latest`-style aliases update as new content is stored
 
 ## Usage
@@ -94,7 +95,7 @@ blob oci export busybox -o busybox.tar # tar archive
 blob oci ls busybox
 ```
 
-`oci import` and `oci export` are the primary verbs; `oci add`/`oci get` work as aliases to match the rest of the CLI. Digests on the two sides are the *same bytes* (`sha256:<hex>` ≡ the store's sha2-256 multihash), so content imported via OCI is the same CAS entry as the identical content added with `add` — it deduplicates for free. There is no registry I/O (no `docker://`/`oras://` pull, no tags): in and out are local layouts.
+`oci import` and `oci export` are the primary verbs; `oci add`/`oci get` work as aliases to match the rest of the CLI. Digests on the two sides are the *same bytes* (`sha256:<hex>` ≡ the store's sha2-256 multihash), so content imported via OCI is the same CAS entry as the identical content added with `add` — it deduplicates for free. There is no registry I/O **in these commands** (input and output are local layouts); serving an already-imported layout as a registry is `blob serve`, which — like the plain-HTTP `curl`-able gateway — also speaks the OCI distribution *read* API under `/v2/` (see the "OCI distribution pull" section below).
 
 ### HTTP gateway
 
@@ -139,6 +140,39 @@ curl http://127.0.0.1:8080/blob/v060084h0p8uhcetb0l9o30ji4oa0aq7jnrrulb0ofjlteq3
 
 # or by name — 302 → /blob/<CID>, follow with -L
 curl -L http://127.0.0.1:8080/name/test.json
+```
+
+### OCI distribution pull (`/v2/`)
+
+The same server speaks the OCI distribution *read* API, so a layout you import
+is pullable by stock OCI clients without exporting it. The repository name is
+the CID the store already prints (`blob oci import` → `index <CID>`) or a stored
+name:
+
+```
+GET /v2/                                            # ping
+GET /v2/blob/<CID>/manifests/latest                 # primary: the layout index
+GET /v2/blob/<CID>/blobs/sha256:...                 # primary: an inner component
+GET /v2/name/<name>/manifests/latest                # secondary: same, by name
+GET /v2/name/<name>/blobs/sha256:...                # secondary: an inner component
+```
+
+- `<CID>` is the outer (index-root) CID from `oci import`; its multihash *is* the store key of the layout's `index.json`, so the OCI pull and the `blob://` gateway (`/blob/<CID>`) hit the same index blob. Inner components stay `sha256:<hex>` (no CID needed) — just find them with `oci ls <name>`.
+- The only tag is `latest` (→ the layout index); there is no tag map because the store has no name:tag split.
+- Read-only (no push), no auth, no HTTPS — the server assumes a **plain-HTTP** base on localhost, the way a trusted local registry is configured.
+
+```bash
+# terminal 1: import + serve
+blob oci import busybox.tar --name busybox     # prints the index CID
+blob serve                                      # http://127.0.0.1:8080
+
+# terminal 2: pull the same content two ways over the same /v2/ surface
+CID=<the CID oci import printed>
+podman pull docker://127.0.0.1:8080/blob/$CID:latest        # primary (CID)
+podman pull docker://127.0.0.1:8080/name/busybox:latest     # secondary (name)
+
+# or, without an OCI client:
+curl http://127.0.0.1:8080/v2/blob/$CID/manifests/latest
 ```
 
 ### Name index
