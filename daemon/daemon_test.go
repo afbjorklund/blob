@@ -270,6 +270,18 @@ func TestOCIServe(t *testing.T) { //nolint:gocyclo
 			wantHeaders: map[string]string{"Docker-Content-Digest": l.indexDigest.String(), "Content-Type": oci.MediaTypeImageIndex},
 		},
 		{
+			// X-Blob-Cid: the store's CID for the index, discoverable even over
+			// the OCI surface (the HTTP gateway's /name/<name> 302 exposes the
+			// same value in its Location) — and independent of how the client
+			// addressed it (here via name/).
+			name:        "secondary: manifest latest exposes X-Blob-Cid",
+			method:      http.MethodGet,
+			path:        "/v2/" + repoByName + "/manifests/latest",
+			wantStatus:  http.StatusOK,
+			wantBody:    l.indexBytes,
+			wantHeaders: map[string]string{"X-Blob-Cid": cidStr},
+		},
+		{
 			name:       "primary: manifest by tag latest",
 			method:     http.MethodGet,
 			path:       "/v2/" + repoByID + "/manifests/latest",

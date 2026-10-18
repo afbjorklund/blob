@@ -275,6 +275,28 @@ func serveV2Manifest(w http.ResponseWriter, r *http.Request, obj *ociRepo, ref s
 	w.Header().Set("Content-Type", mediaType)
 	w.Header().Set("Docker-Content-Digest", d.String())
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	// X-Blob-Cid: the store's CID for the *layout root* (the index, which is
+	// what `blob oci import` printed), the same value the HTTP gateway's
+	// /name/<name> 302 Location carries. The spec's Docker-Content-Digest is
+	// only "sha256:<hex>" — it lacks the codec — so it does not pin the CID
+	// (Json vs Raw is decided by first-byte, see the daemon package); the
+	// X- prefix keeps it out of the distribution-spec namespace and OCI
+	// clients ignore unknown response headers, so this can never break a
+	// compliant pull. It is the discoverable "real path", the same way the dir
+	// backend's symlink or sql's foreign key links a name to its blob.
+	//
+	// We only attach it when the object is the index (d == obj.indexDigest),
+	// for both `blob/<CID>` and `name/<name>` repos. On `blob/<CID>` the CID is
+	// already in the URL and the header is redundant (harmless — a consistent
+	// "CID for the root" contract); on `name/<name>` it carries the derived
+	// CID. On any sub-manifest it would mislead (the CID names the *whole
+	// layout*), so we do not attach it there.
+	if d == obj.indexDigest && len(body) > 0 {
+		c := cid.Build(cid.CodecForFirstByte(body[0]), id)
+		if s, err := cid.Render(c); err == nil {
+			w.Header().Set("X-Blob-Cid", s)
+		}
+	}
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
 		return
