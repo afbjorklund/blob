@@ -1,4 +1,4 @@
-package main
+package daemon
 
 import (
 	"bytes"
@@ -17,11 +17,11 @@ import (
 	"blob/storage"
 )
 
-// memBackend is an in-memory storage.StorageBackend for the /v2/ handler tests:
+// memBackend is an in-memory storage.StorageBackend for the handler tests:
 // a blob map + a name map, mirroring the in-memory stores the storage backend
-// tests use. main itself has no test harness, so this stands in for a real
-// read-only backend (the handler only calls Lookup / Get, so Put / Index / Peek
-// / Close are minimal).
+// tests use. The daemon speaks only the StorageBackend interface, so this
+// stands in for a real read-only backend (the handler only calls Lookup / Get,
+// so Put / Index / Peek / Close are minimal).
 type memBackend struct {
 	mu    sync.Mutex
 	blobs map[string][]byte // identity (multihash bytes) -> blob
@@ -155,8 +155,10 @@ func buildTestLayout(t *testing.T) *testLayout {
 }
 
 // storeLayout stores every blob of the layout under its store identity and
-// records name → the index key (what `oci import` does).
-func storeLayout(t *testing.T, be *memBackend, name string, l *testLayout) {
+// records name → the index key (what `oci import` does). It takes the backend
+// interface so the unit test can seed an in-memory store and the smoke test a
+// real dir backend.
+func storeLayout(t *testing.T, be storage.StorageBackend, name string, l *testLayout) {
 	t.Helper()
 	put := func(d oci.Digest, b []byte) {
 		id, err := identity.FromOCI(d)
@@ -181,19 +183,12 @@ func storeLayout(t *testing.T, be *memBackend, name string, l *testLayout) {
 	}
 }
 
-// newTestServer wires /blob/, /name/ and /v2/ exactly as runServe does, so the
-// handler is tested against the same mux the command serves.
+// newTestServer serves the backend through the real daemon.Handler (the same
+// mux the CLI serves), so the handler is tested against an in-memory backend
+// but the exact routing the daemon wires.
 func newTestServer(t *testing.T, be *memBackend) *httptest.Server {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/blob/", func(w http.ResponseWriter, r *http.Request) {
-		serveBlob(w, r, be, r.URL.Path[len("/blob/"):])
-	})
-	mux.HandleFunc("/name/", func(w http.ResponseWriter, r *http.Request) {
-		serveName(w, r, be, r.URL.Path[len("/name/"):])
-	})
-	mux.Handle("/v2/", ociV2Handler(be))
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewServer(New(be).Handler())
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -222,7 +217,7 @@ func doHTTP(t *testing.T, method, url string) (int, []byte, http.Header) {
 // tag, HEAD, blobs (layer, config, unknown), OPTIONS, an unknown repository,
 // and the Content-Type / Docker-Content-Digest headers. It runs against an
 // in-memory backend holding a single-manifest layout, served through the same
-// mux `runServe` builds.
+// mux the daemon's Handler builds.
 func TestOCIServe(t *testing.T) { //nolint:gocyclo
 	be := newMemBackend()
 	l := buildTestLayout(t)

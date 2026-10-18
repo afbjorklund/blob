@@ -1,4 +1,4 @@
-package main
+package daemon
 
 import (
 	"encoding/json"
@@ -16,9 +16,9 @@ import (
 	godigest "github.com/opencontainers/go-digest"
 )
 
-// OCI distribution (`/v2/`) read endpoint on top of `blob serve`, so a layout
-// already in the store can be pulled by stock OCI clients (podman, skopeo, oras,
-// containerd, buildkit) without an `oci export` step.
+// OCI distribution (/v2/) read endpoint on top of the daemon, so a layout
+// already in the store can be pulled by stock OCI clients (podman, skopeo,
+// oras, containerd, buildkit) without an `oci export` step.
 //
 // It mirrors the two HTTP gateway surfaces in the store's own language, so an
 // OCI client and an HTTP client address the *same* content the same way:
@@ -34,9 +34,9 @@ import (
 // through the name index (last-add-wins) and serves the same layout, just like
 // /name/<name> 302-redirects to /blob/<CID>.
 //
-// Read-only by design: the backend is opened storage.ReadOnly in runServe, so the
-// write paths do not exist by construction. The endpoints implemented are the
-// distribution-spec read surface:
+// Read-only by design: the backend is opened storage.ReadOnly by the caller,
+// so the write paths do not exist by construction. The endpoints implemented
+// are the distribution-spec read surface:
 //
 //	GET    /v2/                              the spec's ping
 //	GET|HEAD /v2/<repo>/manifests/<ref>     the index (for `latest`) or a manifest
@@ -44,9 +44,9 @@ import (
 //
 // `<ref>` is `latest` (the only tag; we have no name:tag split yet, so this is
 // the default) or an OCI digest `sha256:<hex>` (→ the index, or a manifest).
-// The inner blobs are always addressed by their `sha256:` digest — clients pull
-// them that way, and we do not need a CID for anything but the outer index root.
-// Push / tag-listing / auth are intentionally out of scope for v1.
+// The inner blobs are always addressed by their `sha256:` digest — clients
+// pull them that way, and we do not need a CID for anything but the outer index
+// root. Push / tag-listing / auth are intentionally out of scope for v1.
 
 // ociRepo bundles the per-request state for one OCI repository: the index key,
 // its bytes, its digest, and the set of reachable digests. Building is the same
@@ -63,7 +63,7 @@ type ociRepo struct {
 
 // errNameUnknown is the sentinel a ref failed to resolve to a stored object;
 // the handler maps it to the distribution NAME_UNKNOWN (404) error.
-var errNameUnknown = errors.New("oci serve: name unknown")
+var errNameUnknown = errors.New("daemon: oci name unknown")
 
 // resolveIndexKey maps an OCI repository name to the store key (multihash) of
 // its layout index:
@@ -113,7 +113,7 @@ func newOCIRepo(backend storage.StorageBackend, repo string) (*ociRepo, error) {
 	// Reachable walks index → manifests → config+layers, which also validates the
 	// index (a non-index blob fails here). It is the same call `oci ls` and
 	// `oci export` rely on.
-	reachable, err := oci.Reachable(storeSource{backend: backend}, indexBytes)
+	reachable, err := oci.Reachable(source{backend: backend}, indexBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -149,10 +149,12 @@ func (o *ociRepo) resolveRef(ref string) (oci.Digest, error) {
 	return d, nil
 }
 
-// ociV2Handler returns an http.Handler for the /v2/ subtree, wired in runServe
-// as `mux.Handle("/v2/", ociV2Handler(backend))`. It mirrors the flat-handler
-// style of serveBlob/serveName (which take the shared backend as an argument).
-func ociV2Handler(backend storage.StorageBackend) http.Handler {
+// ociV2Handler returns an http.Handler for the /v2/ subtree, wired into the
+// Server's mux as `mux.Handle("/v2/", s.ociV2Handler())`. It mirrors the
+// flat-handler style of serveBlob/serveName (which close over the shared
+// backend via the Server receiver).
+func (s *Server) ociV2Handler() http.Handler {
+	backend := s.backend
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		serveV2(w, r, backend)
 	})

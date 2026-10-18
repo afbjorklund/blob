@@ -1,28 +1,28 @@
-package main
+package daemon
 
 import (
 	"io"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"blob/cid"
+	"blob/identity"
 	"blob/storage"
 )
 
 // TestOCIServeSmoke is the opt-in, end-to-end counterpart of TestOCIServe for
 // the /v2/ distribution endpoint. Where TestOCIServe holds the wire contract
 // against an in-memory backend, this drives the *real* pipeline a user uses:
-// a real dir backend, a real `oci import` of a file (the same runOCIAdd the
-// CLI takes), the /v2/ handler served over a real TCP socket, probed with a
-// stock `curl`. Like TestDirSmoke / TestHTTPSmoke / TestS3Smoke it runs only
-// when its env var is set, so `go test ./...` stays green in sandboxes.
+// a real dir backend, a single-manifest OCI layout stored in it (the same
+// `storeLayout` the unit test uses), the real daemon.Handler served over a real
+// TCP socket, and probed with a stock `curl`. Like TestDirSmoke /
+// TestHTTPSmoke / TestS3Smoke it runs only when its env var is set, so
+// `go test ./...` stays green in sandboxes.
 //
-//	BLOB_SERVE_SMOKE=1 go test -v -run TestOCIServeSmoke .
+//	BLOB_SERVE_SMOKE=1 go test -v -run TestOCIServeSmoke ./daemon
 func TestOCIServeSmoke(t *testing.T) {
 	if os.Getenv("BLOB_SERVE_SMOKE") == "" {
 		t.Skip("set BLOB_SERVE_SMOKE=1 to run the /v2/ smoke test (needs a scratch dir and `curl`)")
@@ -31,35 +31,18 @@ func TestOCIServeSmoke(t *testing.T) {
 		t.Skip("the /v2/ smoke test needs `curl` on PATH")
 	}
 
-	// A small JSON file: first byte `{` → Json codec, so the CID derives
-	// cleanly and the layout's reachable set is index → manifest → config({}) and layer.
-	payload := []byte(`{"smoke":"oci-serve","value":42}`)
-	file := filepath.Join(t.TempDir(), "smoke-artifact.json")
-	if err := os.WriteFile(file, payload, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Import it into a real dir store (the CLI's own import path).
-	oldPath, oldName, oldType := storagePath, ociName, storageType
-	storagePath, ociName, storageType = t.TempDir(), "smoke", "dir"
-	defer func() { storagePath, ociName, storageType = oldPath, oldName, oldType }()
-	if err := runOCIAdd(nil, []string{file}); err != nil {
-		t.Fatalf("oci import: %v", err)
-	}
-
-	// Serve the same mux runServe wires, on a random localhost port.
-	backend, err := getStorageBackend(storage.ReadOnly)
+	dir := t.TempDir()
+	backend, err := storage.NewStorage(storage.StorageDir, dir, "", "", storage.Auth{}, storage.ReadWrite)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer backend.Close()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/blob/", func(w http.ResponseWriter, r *http.Request) {
-		serveBlob(w, r, backend, r.URL.Path[len("/blob/"):])
-	})
-	mux.Handle("/v2/", ociV2Handler(backend))
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	t.Cleanup(func() { _ = backend.Close() })
+
+	l := buildTestLayout(t)
+	storeLayout(t, backend, "smoke", l)
+
+	srv := httptest.NewServer(New(backend).Handler())
+	t.Cleanup(srv.Close)
 	base := "http://" + srv.Listener.Addr().String()
 
 	// The index bytes and CID, read straight from the store (the ground truth
@@ -72,6 +55,13 @@ func TestOCIServeSmoke(t *testing.T) {
 	first, err := backend.Peek(key, 1)
 	if err != nil {
 		t.Fatal(err)
+	}
+	id, err := identity.FromOCI(l.indexDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(key) != string(id) {
+		t.Fatalf("name key %q != index key %q", key, id)
 	}
 	c := cid.Build(cid.CodecForFirstByte(first[0]), key)
 	cidStr, err := cid.Render(c)
@@ -94,7 +84,7 @@ func TestOCIServeSmoke(t *testing.T) {
 	}
 
 	// `latest` is our one synthesised tag (→ the layout root). The *primary*
-	// repository is blob/<CID> (the exact CID `blob oci import` printed); the
+	// repository is blob/<CID> (the exact CID `blob oci import` prints); the
 	// secondary is name/<name> (same as the HTTP /name/<name>). Both must
 	// serve the stored index bytes over the real socket.
 	if body, code, err := curlGET(t, base+"/v2/blob/"+cidStr+"/manifests/latest"); err != nil || code != "200" || body != string(want) {

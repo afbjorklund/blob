@@ -1,18 +1,12 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
-	"time"
 
 	"blob/cid"
 	"blob/identity"
@@ -579,143 +573,4 @@ func runLookup(cmd *cobra.Command, args []string) error {
 // sql).
 func getStorageBackend(mode storage.Mode) (storage.StorageBackend, error) {
 	return storage.NewStorage(storage.StorageType(storageType), storagePath, s3Bucket, s3Region, resolveCLIAuth(), mode)
-}
-
-// runServe starts a read-only HTTP gateway for the store, so a stable
-// scheme like blob://<CID> can be mapped to
-// http://<listen>/blob/<CID> without the client knowing the backend.
-//
-// The backend is opened once, read-only, and shared across the whole server.
-// A read-only store has nothing to write, so it is the natural fit for a
-// shared handle, and the sql backend is backed by a connection pool — hence
-// safe to hand to every request goroutine — while the dir backend needs no
-// locking at all. Opening a fresh backend per request would instead pay the
-// (expensive, and on sql, file-descriptor-and-pool) open cost on every
-// request for no benefit; the old per-request design was the fallback taken
-// only because a single connection could not be shared, which the pool
-// removes. A read-only open also means the server cannot create the store or
-// accidentally mutate it (a missing store is a clear error, not a side
-// effect), the same reason the dir backend honors the read-only mode.
-func runServe(cmd *cobra.Command, args []string) error {
-	backend, err := getStorageBackend(storage.ReadOnly)
-	if err != nil {
-		return err
-	}
-	defer backend.Close()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/blob/", func(w http.ResponseWriter, r *http.Request) {
-		serveBlob(w, r, backend, r.URL.Path[len("/blob/"):])
-	})
-	mux.HandleFunc("/name/", func(w http.ResponseWriter, r *http.Request) {
-		serveName(w, r, backend, r.URL.Path[len("/name/"):])
-	})
-	// /v2/ is the OCI distribution read surface (see main_oci_serve.go): a layout
-	// already in the store can be pulled by stock OCI clients (podman, oras,
-	// skopeo, buildkit) with no `oci export` step. It is a distinct path prefix
-	// from /blob/ and /name/, so the mux disambiguates by prefix and the three
-	// namespaces never shadow each other.
-	mux.Handle("/v2/", ociV2Handler(backend))
-
-	srv := &http.Server{Addr: listenAddr, Handler: mux}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	errCh := make(chan error, 1)
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-	}()
-
-	fmt.Printf("Serving on http://%s\n", listenAddr)
-
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	return srv.Shutdown(shutdownCtx)
-}
-
-// serveBlob streams a single blob to the response, identified by CID.
-// The CID carries the codec (→ Content-Type) and the multihash (→ the
-// digest, → Content-Digest) — both already known at request time, so no
-// content is read for the headers. The body is streamed; the blob is
-// never read into memory.
-//
-// backend is the server's shared read-only backend (opened once in
-// runServe). It is safe to call Get on it from many goroutines
-// concurrently: the sql backend pools its connections and holds each
-// connection for the duration of the read, the dir backend opens a fresh
-// file handle per call.
-func serveBlob(w http.ResponseWriter, r *http.Request, backend storage.StorageBackend, ref string) {
-	c, err := cid.Parse(ref)
-	if err != nil {
-		http.Error(w, "invalid CID: "+ref, http.StatusBadRequest)
-		return
-	}
-
-	digest, err := digestFromCID(c)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	reader, size, err := backend.Get(digest)
-	if err != nil {
-		http.Error(w, "not found: "+ref, http.StatusNotFound)
-		return
-	}
-	defer reader.Close()
-
-	contentDigest, err := cid.ContentDigestHeader(c)
-	if err != nil {
-		http.Error(w, "invalid multihash", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Digest", contentDigest)
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	w.Header().Set("Content-Type", cid.MediaType(c))
-
-	w.WriteHeader(http.StatusOK)
-
-	if _, err := io.Copy(w, reader); err != nil {
-		return
-	}
-}
-
-// serveName resolves an index name to its blob, derives the blob's CID
-// by peeking the first byte (the same content-based codec rule as
-// `add`/`hash`), and issues a 302 redirect to /blob/<CID>. The redirect
-// is the name→blob pointer (mirroring the dir backend's symlink for the
-// same role) and leaves all streaming / header work to /blob/<CID>.
-// 302 (not 301): the name→CID mapping is mutable (last add wins), so it
-// must not be cached.
-func serveName(w http.ResponseWriter, r *http.Request, backend storage.StorageBackend, name string) {
-	digest, err := backend.Lookup(name)
-	if err != nil {
-		http.Error(w, "name not found: "+name, http.StatusNotFound)
-		return
-	}
-
-	c, err := cidForDigest(backend, digest)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	cidStr, err := cid.Render(c)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	http.Redirect(w, r, "/blob/"+cidStr, http.StatusFound)
 }
