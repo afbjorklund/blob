@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -193,6 +194,27 @@ func (s *DirStorage) Lookup(name string) (Digest, error) {
 	}
 
 	return digest, nil
+}
+
+// Names lists the index directory: one entry per recorded name, so the
+// CAS is not involved at all (blobs with no name are invisible, blobs
+// with several names list once per name). os.ReadDir returns the entries
+// sorted by name, which satisfies the contract's stable-order clause. A
+// store that has never been indexed (no index/ dir yet) is a legitimate
+// empty index, not an error.
+func (s *DirStorage) Names() ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(s.rootDir, "index"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names, nil
 }
 
 // Peek returns the first n bytes of a blob by opening it and reading at

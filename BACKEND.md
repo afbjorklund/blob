@@ -76,7 +76,26 @@ GET  <base>/<hex>            → blob bytes               (get)
 HEAD <base>/<hex>            → 200 / 404                 (existence check)
 PUT  <base>/index/<name>     body = hex multihash        (index / add name)
 GET  <base>/index/<name>     → hex multihash             (lookup)
+GET  <base>/index/           → JSON autoindex of names   (list names)
 ```
+
+`GET <base>/index/` (the directory listing, with the trailing slash) is the
+backend's `Names()` surface — the index contents as a JSON array of
+`{"name":..., "type":"file", ...}` entries. The server must have autoindex
+enabled for that directory **and** be serving it as JSON (the two-step
+contract: autoindex on + JSON format). nginx achieves this with:
+
+```nginx
+location /index/ {
+    autoindex on;
+    autoindex_format json;
+}
+```
+
+Any other server (Apache `mod_autoindex` with a `AddOutputFormat` JSON
+directive, a reverse proxy that generates the same JSON, Ceph RGW's
+`?list-type=2` XML converted to the same shape, etc.) is fine as long as the
+directory GET returns the same JSON shape.
 
 ### nginx + htpasswd (Quick Start)
 
@@ -98,16 +117,21 @@ GET  <base>/index/<name>     → hex multihash             (lookup)
        auth_basic        "blob";
        auth_basic_user_file /etc/nginx/htpasswd;
 
-       location / {
-           try_files $uri @forbidden;
-           # Allow reads for everyone who authenticates, and writes too,
-           # but only from the trusted internal range:
-           limit_except GET HEAD {
-               allow 10.0.0.0/8;
-               deny  all;
-           }
-       }
-       location @forbidden { return 403; }
+        location / {
+            try_files $uri @forbidden;
+            # Allow reads for everyone who authenticates, and writes too,
+            # but only from the trusted internal range:
+            limit_except GET HEAD {
+                allow 10.0.0.0/8;
+                deny  all;
+            }
+        }
+        # The `list` command needs the index/ directory as a JSON autoindex:
+        location /index/ {
+            autoindex on;
+            autoindex_format json;
+        }
+        location @forbidden { return 403; }
    }
    ```
 
@@ -199,8 +223,9 @@ filesystem under the `dir` backend, real SigV4 signing for `s3`, etc.
 | `TestS3Smoke`   | `BLOB_S3_ENDPOINT` + `BLOB_S3_BUCKET` | a real S3 / Ceph RGW endpoint (creds via `BLOB_USER`/`BLOB_PASS`) |
 
 All three check the same contract: `Put` → `Peek` (first bytes) → name
-`Index`/`Lookup` round-trip with last-add-wins re-point → the read-only guard
-rejecting writes → `Has`/`Get` full read-back.
+`Index`/`Lookup` round-trip with last-add-wins re-point → `Names` (list the
+index, not the CAS) → the read-only guard rejecting writes → `Has`/`Get` full
+read-back.
 
 ```bash
 BLOB_DIR_PATH=/mnt/nfs/blobstore \

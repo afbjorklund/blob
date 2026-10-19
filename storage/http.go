@@ -2,11 +2,13 @@ package storage
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -102,6 +104,14 @@ func (s *HTTPStorage) blobURL(hash Digest) string {
 // nameURL is the on-wire path of a name index entry.
 func (s *HTTPStorage) nameURL(name string) string {
 	return s.baseURL.JoinPath(indexPrefix, name).String()
+}
+
+// indexDirURL is the on-wire path of the name index *directory* (the trailing
+// slash is load-bearing: without it a well-behaved server 301-redirects to
+// the directory and we end up chasing the redirect when the listing we
+// actually want is the autoindex JSON body of the directory).
+func (s *HTTPStorage) indexDirURL() string {
+	return s.baseURL.JoinPath(indexPrefix).String() + "/"
 }
 
 // ok reports whether a response status is 2xx.
@@ -306,6 +316,60 @@ func (s *HTTPStorage) Lookup(name string) (Digest, error) {
 		return nil, fmt.Errorf("name %q is not a valid hash: %q", name, string(raw))
 	}
 	return digest, nil
+}
+
+// autoindexEntry is one entry of the JSON autoindex a directory-enabled
+// webserver returns for the index/ directory (e.g. nginx's
+// `autoindex_format json`): the name and type of each file in the
+// directory, plus mtime/size we do not care about. The type is expected to
+// be "file" (this backend's index entries are flat files); a subdirectory
+// is not a name in this store, so it is ignored.
+type autoindexEntry struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// Names lists the name index by GETting the JSON autoindex of
+// <base>/index/ and keeping the file entries. The server is expected to
+// have autoindex enabled for that directory and to serve it as JSON (the
+// backend's on-wire contract is the GET/PUT surface plus this directory
+// listing; a server without it will 403/404 and the error propagates).
+// The response is re-sorted client-side so the result order is the
+// contract's lexicographic one regardless of the server's ordering.
+func (s *HTTPStorage) Names() ([]string, error) {
+	req, err := http.NewRequest(http.MethodGet, s.indexDirURL(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := s.do(req, http.MethodGet, indexPrefix)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []autoindexEntry
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, fmt.Errorf("index listing from %s is not a JSON autoindex: %v", s.indexDirURL(), err)
+	}
+
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Name == "" || e.Name == "." || e.Name == ".." {
+			continue
+		}
+		if e.Type != "" && e.Type != "file" {
+			continue
+		}
+		names = append(names, e.Name)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // Peek returns the first n bytes of a blob with a Range request (bytes=0..n-1),

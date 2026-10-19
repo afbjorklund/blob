@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -91,6 +92,17 @@ func (m *memBackend) Peek(hash storage.Digest, n int) ([]byte, error) {
 		b = b[:n]
 	}
 	return b, nil
+}
+
+func (m *memBackend) Names() ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	names := make([]string, 0, len(m.names))
+	for n := range m.names {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func (m *memBackend) Close() error { return nil }

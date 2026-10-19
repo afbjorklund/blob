@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,8 +84,8 @@ func newS3TestServer(t *testing.T) *httptest.Server {
 
 	handle := func(w http.ResponseWriter, r *http.Request) {
 		remaining := strings.TrimPrefix(r.URL.Path, "/")
-		bucket, key, ok := strings.Cut(remaining, "/")
-		if !ok || bucket != s3TestBucket {
+		bucket, key, _ := strings.Cut(remaining, "/")
+		if bucket != s3TestBucket {
 			http.Error(w, "bucket not found", http.StatusNotFound)
 			return
 		}
@@ -107,6 +109,33 @@ func newS3TestServer(t *testing.T) *httptest.Server {
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
 		case http.MethodGet, http.MethodHead:
+			// S3 bucket listing (the backend's Names() surface): an object
+			// GET without an object key and with `list-type=2` is a List
+			// Objects V2 for the bucket. This shim answers with the objects
+			// under the requested prefix only (the backend asks for
+			// prefix="index/"), in the S3 ListBucketResult XML shape.
+			if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+				prefix := r.URL.Query().Get("prefix")
+				mu.Lock()
+				keys := make([]string, 0, len(objects))
+				for k := range objects {
+					if strings.HasPrefix(k, prefix) {
+						keys = append(keys, k)
+					}
+				}
+				mu.Unlock()
+				sort.Strings(keys)
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>%[1]s</Name><Prefix>%[2]s</Prefix><KeyCount>%[3]d</KeyCount><IsTruncated>false</IsTruncated>`, s3TestBucket, prefix, len(keys))
+				for _, k := range keys {
+					_, _ = fmt.Fprintf(w, "<Contents><Key>%s</Key><LastModified>%s</LastModified><Size>64</Size><StorageClass>STANDARD</StorageClass></Contents>", k, time.Now().UTC().Format(time.RFC3339))
+				}
+				_, _ = w.Write([]byte("</ListBucketResult>"))
+				return
+			}
 			b, found := get()
 			if !found {
 				http.Error(w, "no such key", http.StatusNotFound)
@@ -173,6 +202,28 @@ func newHTTPTestServer(t *testing.T) *httptest.Server {
 				mu.Unlock()
 				w.WriteHeader(http.StatusOK)
 			case http.MethodGet:
+				if name == "" {
+					// A trailing-slash (or bare "index") GET on the directory
+					// is the JSON autoindex of the index/ directory — the
+					// backend's Names() surface. This shim mirrors a
+					// `autoindex_format json` nginx: one {"name":..,"type":..}
+					// entry per name.
+					mu.Lock()
+					names := make([]string, 0, len(index))
+					for n := range index {
+						names = append(names, n)
+					}
+					mu.Unlock()
+					sort.Strings(names)
+					entries := make([]autoindexEntry, 0, len(names))
+					for _, n := range names {
+						entries = append(entries, autoindexEntry{Name: n, Type: "file"})
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(entries)
+					return
+				}
 				mu.Lock()
 				v, found := index[name]
 				mu.Unlock()
@@ -323,6 +374,26 @@ func TestRoundTrip(t *testing.T) { //nolint:gocyclo
 			}
 			if d, err := w.Lookup("alpha"); err != nil || !bytes.Equal(d, entries[1].key) {
 				t.Fatalf("Lookup(alpha) after re-add = %q, %v; want %q (last add wins)", d, err, entries[1].key)
+			}
+
+			// Names lists the index (not the CAS): the recorded names, sorted,
+			// and none of the blob keys (which have no name).
+			got := map[string]bool{}
+			if ns, err := w.Names(); err != nil {
+				t.Fatalf("Names(): %v", err)
+			} else {
+				if len(ns) != 2 {
+					t.Fatalf("Names() = %v; want 2 names (alpha, beta)", ns)
+				}
+				for i, n := range ns {
+					got[n] = true
+					if i > 0 && ns[i-1] > n {
+						t.Fatalf("Names() = %v; want sorted", ns)
+					}
+				}
+			}
+			if !got["alpha"] || !got["beta"] {
+				t.Fatalf("Names() = %v; want to include alpha and beta", got)
 			}
 
 			// Peek is bounded by the request and matches the stored head.

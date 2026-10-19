@@ -65,6 +65,21 @@ func TestDirSmoke(t *testing.T) {
 		t.Fatalf("Lookup alias after re-add = %q, %v; want %q (last add wins)", d, err, keyB)
 	}
 
+	// Names: the index directory must include our new name.
+	found := false
+	if ns, err := w.Names(); err != nil {
+		t.Fatalf("Names(): %v", err)
+	} else {
+		for _, n := range ns {
+			if n == alias {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("Names() = %v; want to include %q", ns, alias)
+		}
+	}
+
 	// Read-only guard: the same writes must be refused on the read-only pair.
 	if err := ro.Put(keyA, 0, bytes.NewReader(nil)); err != ErrReadOnly {
 		t.Fatalf("read-only Put = %v; want ErrReadOnly", err)

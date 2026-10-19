@@ -308,6 +308,38 @@ func (s *SQLStorage) Lookup(name string) (Digest, error) {
 	return hash, nil
 }
 
+// Names lists the recorded names (the rows of the names table — the index,
+// not the CAS: blobs without a row are invisible). ORDER BY name gives the
+// contract's stable lexicographic order; an empty table is a zero rows, not
+// an error.
+func (s *SQLStorage) Names() ([]string, error) {
+	conn, err := s.take(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	defer s.put(conn)
+
+	var names []string
+	err = sqlitex.ExecuteTransient(
+		conn,
+		"SELECT name FROM names ORDER BY name",
+		&sqlitex.ExecOptions{
+			ResultFunc: func(stmt *sqlite.Stmt) error {
+				b, rerr := io.ReadAll(stmt.ColumnReader(0))
+				if rerr != nil {
+					return rerr
+				}
+				names = append(names, string(b))
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return names, nil
+}
+
 // Peek returns the first n bytes of a blob, without reading the rest (fewer if
 // the blob is shorter than n or empty). It opens the row's data blob
 // (read-only) the same way Get does and copies at most n bytes from the head,

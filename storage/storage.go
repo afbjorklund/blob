@@ -76,6 +76,15 @@ type StorageBackend interface {
 	// `/name` gateway. It reads at most n bytes, so it is bounded work
 	// regardless of blob size and never materializes the blob.
 	Peek(hash Digest, n int) ([]byte, error)
+	// Names returns the index names currently recorded in the store (the
+	// key set of the name→blob index). It lists the *index*, not the CAS:
+	// a store with one blob and two aliases returns two names; a store
+	// with N blobs and zero names returns nil. The results are sorted
+	// lexicographically so callers get a stable order independent of
+	// backend (dir ReadDir sorts by byte order, sql's ORDER BY name sorts
+	// codepoint order, http/s3 receive the listing and re-sort). An empty
+	// index is reported as a nil (or empty) slice, not an error.
+	Names() ([]string, error)
 	// Close releases the backend's resources (the sql backend closes its
 	// connection pool, interrupting any reads in flight and unblocking any
 	// waiting connection checkout); the dir backend has nothing to release.

@@ -17,7 +17,7 @@ See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
 - **Streaming I/O** - Files are streamed to and from the backend without materializing the entire blob in memory. The `sqlite` backend reads via SQLite's blob API (`db.OpenBlob` in a read-only handle) instead of loading the whole row
 - **Read-only HTTP gateway** - A built-in `blob serve` command (like the IPFS HTTP gateway, but for this local store) serves `GET /blob/<CID>`, so a stable `blob://<CID>` scheme can be mapped to `http://<host>/blob/<CID>` without the client knowing the backend or storage path. Response carries `Content-Type` (from the CID codec), `Content-Length`, and `Content-Digest: sha-256=…` (the stored multihash digest). `GET /name/<name>` resolves the name and `302`-redirects to the canonical `/blob/<CID>`
 - **OCI distribution registry (pull)** - `blob serve` also speaks the OCI distribution *read* API under `/v2/`, so an already-imported layout can be pulled by stock clients (`podman pull docker://…`, `oras pull oras://…`, `skopeo`, buildkit) with no `oci export` step. The repository name is the CID the store already printed: `docker://host/blob/<CID>` (primary, the exact CID from `oci import`) or `docker://host/name/<name>` (secondary, the name index). The only tag is `latest` (→ the layout index); inner components are addressed by their `sha256:<hex>` digest, exactly as the OCI spec expects. Read-only (no push), no auth/HTTPS — treat the base as a trusted plain-HTTP registry (localhost by default)
-- **Name index** - A separate per-name index in each backend (symlink in the dir backend, foreign-keyed table in the sql backend, an `index/<name>` object holding the hash in the http backend) lets you resolve a name to the exact stored blob CID (e.g. `ubuntu_latest.sif` and `ubuntu_26.04.sif` both resolve to the same blob). Last add wins, so `latest`-style aliases update as new content is stored
+- **Name index** - A separate per-name index in each backend (symlink in the dir backend, foreign-keyed table in the sql backend, an `index/<name>` object holding the hash in the http/s3 backends) lets you resolve a name to the exact stored blob CID (e.g. `ubuntu_latest.sif` and `ubuntu_26.04.sif` both resolve to the same blob). Last add wins, so `latest`-style aliases update as new content is stored. `blob list` prints the recorded names (the index, not the CAS)
 
 ## Usage
 
@@ -58,6 +58,22 @@ blob get ubuntu_latest.sif -o output.sif
 
 Options:
 - `-o <output-file>` - Output file path (defaults to the argument as filename)
+
+### List names
+
+```bash
+blob list
+```
+
+Prints the names currently recorded in the index, one per line. It lists the
+**index**, not the CAS: blobs with no recorded name are invisible, and a blob
+under several names lists once per name. An empty store prints nothing.
+
+```console
+$ blob list
+ubuntu_26.04.sif
+ubuntu_latest.sif
+```
 
 ### Look up a name's CID (convenience)
 
@@ -233,7 +249,7 @@ test
 
 ### HTTP backend
 
-Point `--path` at a remote server and the store (blobs and name index) lives there — `add` issues `PUT`, `get`/`lookup` issue `GET` (and `HEAD` for the existence check the CLI uses before storing). Blobs are addressed by the hex of the multihash, the name index lives at `index/<name>` (the body is the hex multihash — the server-side counterpart of the dir backend's symlink / sql foreign key):
+Point `--path` at a remote server and the store (blobs and name index) lives there — `add` issues `PUT`, `get`/`lookup` issue `GET` (and `HEAD` for the existence check the CLI uses before storing). Blobs are addressed by the hex of the multihash, the name index lives at `index/<name>` (the body is the hex multihash — the server-side counterpart of the dir backend's symlink / sql foreign key). `blob list` needs the server to serve `GET <base>/index/` as a JSON autoindex (see [BACKEND.md](BACKEND.md) for the nginx config):
 
 ```console
 # server on http://localhost:8080 storing blobs at /<hex> and names at /index/<name>

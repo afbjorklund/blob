@@ -256,6 +256,15 @@ func main() {
 
 	rootCmd.AddCommand(lookupCmd)
 
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List the names recorded in the index",
+		Args:  cobra.NoArgs,
+		RunE:  runList,
+	}
+
+	rootCmd.AddCommand(listCmd)
+
 	serveCmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Serve the blob store over HTTP (read-only gateway)",
@@ -562,6 +571,28 @@ func runLookup(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println(cidStr)
+	return nil
+}
+
+// runList prints the recorded index names, one per line. It is the only
+// command that lists the index (not the CAS): a store with one blob and
+// two names prints two lines; a store with stored blobs but no names
+// prints nothing.
+func runList(cmd *cobra.Command, args []string) error {
+	backend, err := getStorageBackend(storage.ReadOnly)
+	if err != nil {
+		return err
+	}
+	defer backend.Close()
+
+	names, err := backend.Names()
+	if err != nil {
+		return err
+	}
+
+	for _, name := range names {
+		fmt.Println(name)
+	}
 	return nil
 }
 

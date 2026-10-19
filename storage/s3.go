@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -198,6 +199,36 @@ func (s *S3Storage) Lookup(name string) (Digest, error) {
 		return nil, fmt.Errorf("name %q is not a valid hash: %q", name, string(raw))
 	}
 	return digest, nil
+}
+
+// Names lists the name index objects (keys "index/<name>") via an S3
+// bucket listing, so it needs no extra server facility — the object API
+// that every S3-compatible endpoint must implement. The prefix keeps the
+// listing scoped to the index (never the CAS), and names are the key with
+// the prefix stripped. Sorted client-side for the contract's stable
+// order; an index with no entries is a nil slice, not an error.
+func (s *S3Storage) Names() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s3PutTimeout)
+	defer cancel()
+
+	names := make([]string, 0)
+	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{
+		Prefix: indexPrefix + "/",
+	}) {
+		if obj.Err != nil {
+			return nil, obj.Err
+		}
+		// Strip the "index/" prefix and drop folder markers (a key with
+		// nothing else, which our own Index method never creates but a
+		// folder marker from another tool might).
+		rest := strings.TrimPrefix(obj.Key, indexPrefix+"/")
+		if rest == "" || strings.ContainsRune(rest, '/') {
+			continue
+		}
+		names = append(names, rest)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // Peek returns the first n bytes of a blob via a ranged GET (bytes=0..n-1), so
