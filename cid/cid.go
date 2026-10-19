@@ -33,10 +33,14 @@ import (
 // go-multicodec directly.
 type Code = multicodec.Code
 
-// CodeRaw and CodeJson are the two codecs the store recognises.
+// CodeRaw and CodeJson are the two codecs the store holds; CodeDagPb (IPFS's
+// default codec, `dag-pb`) is one the store *knows* — a CID of it may name a
+// blob (it is the "ipfs get → blob add" interop handle) but is not a direct
+// address, since the store does not hold it.
 const (
-	CodeRaw  = multicodec.Raw
-	CodeJson = multicodec.Json
+	CodeRaw   = multicodec.Raw
+	CodeJson  = multicodec.Json
+	CodeDagPb = multicodec.DagPb
 )
 
 // Cid is a content identifier: a codec + a multihash, carrying no base (the

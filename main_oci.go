@@ -10,6 +10,7 @@ import (
 
 	"blob/cid"
 	"blob/identity"
+	"blob/index"
 	"blob/oci"
 	"blob/storage"
 
@@ -354,11 +355,11 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	name := ociName
+	name := index.Name(ociName)
 	if name == "" {
-		name = defaultName(args[0])
+		name = index.Default(args[0])
 	}
-	skip, err := checkName(name, indexKey)
+	skip, err := index.Check(name, indexKey)
 	if err != nil {
 		return err
 	}
@@ -443,23 +444,6 @@ func layoutSinkFor(out string) (oci.Sink, func(), error) {
 
 func isTarPath(p string) bool {
 	return filepath.Ext(p) == ".tar" || filepath.Ext(p) == ".tgz"
-}
-
-// defaultName derives an index name from an argument path, stripping a
-// .tar/.tgz/.tar.gz suffix when present.
-func defaultName(arg string) string {
-	base := filepath.Base(arg)
-	for _, suffix := range []string{".tar.gz", ".tar", ".tgz"} {
-		base = trimSuffix(base, suffix)
-	}
-	return base
-}
-
-func trimSuffix(s, suffix string) string {
-	if len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix {
-		return s[:len(s)-len(suffix)]
-	}
-	return s
 }
 
 // runOCILs prints a stored layout's index, manifests, and layer descriptors.

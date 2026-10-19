@@ -11,6 +11,7 @@ import (
 
 	"blob/cid"
 	"blob/identity"
+	"blob/index"
 	"blob/storage"
 
 	"github.com/spf13/cobra"
@@ -430,7 +431,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	name := filepath.Base(filePath)
-	skip, err := checkName(name, digest)
+	skip, err := index.Check(name, digest)
 	if err != nil {
 		return err
 	}
@@ -475,63 +476,6 @@ func runHash(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s  %s\n", cidStr, filePath)
 	return nil
-}
-
-// checkName decides what happens when the index is about to record `nm`,
-// which resolves to the blob `target`. The invariant behind the rule: a name
-// that *looks* like a native handle (an OCI digest the store converts, or a
-// CID the store holds) is intercepted by the resolution order (CID →
-// sha256-digest → name) before the name index is ever consulted — a name
-// entry for it would be unreachable and misleading. So: such a name may be
-// recorded only if it resolves to exactly the blob being stored (and then it
-// is *skipped*, since the entry would be redundant with the direct address);
-// in every other form it is rejected. Names that the resolver will never
-// intercept — sha256 digests of other algorithms ("sha1:" etc., which no
-// resolver path converts) and CIDs for codecs the store doesn't hold (e.g. a
-// dag-pb CID from `ipfs add`, the "ipfs get → blob add" interop handle) —
-// are allowed to record as ordinary names.
-//
-// Separately: '/' is not a legal name character yet (it would make a
-// hierarchy: index/ subdirectories for dir, nested object keys for s3, path
-// segments for http — the FQDN-name story, deferred, see the plan in
-// AGENTS.md; see docs/names.md for the deferred plan); control
-// characters (\0 \n \r DEL) are rejected because no
-// backend can hold them.
-//
-// Returns (skip, err): skip=true means the blob is stored but no name entry
-// is written (the name is already the blob's own direct address); a plain
-// name is (false, nil) — record it.
-func checkName(nm string, target []byte) (bool, error) {
-	if nm == "" || nm == "." || nm == ".." {
-		return false, fmt.Errorf("invalid index name %q", nm)
-	}
-	if strings.ContainsRune(nm, '/') {
-		return false, fmt.Errorf("name %q contains a path separator; names in the index are flat (one level) — FQDN-style names need escaping that is not implemented yet", nm)
-	}
-	for _, c := range nm {
-		if c == 0 || c == '\n' || c == '\r' || c == 0x7f {
-			return false, fmt.Errorf("name %q contains a control character; names in the index cannot hold \\0, \\n or \\r", nm)
-		}
-	}
-	if id, err := identity.FromOCIString(nm); err == nil {
-		if bytes.Equal(id, target) {
-			return true, nil
-		}
-		return false, fmt.Errorf("%q is an OCI digest of another blob; a digest-shaped name is reserved as a direct handle and cannot point elsewhere", nm)
-	}
-	if c, err := cid.Parse(nm); err == nil {
-		if cid.Supported(cid.Codec(c)) {
-			if bytes.Equal(cid.Key(c), target) {
-				return true, nil
-			}
-			return false, fmt.Errorf("%q is a CID for a codec this store holds; the resolver intercepts it as that CID, so it cannot also be a name pointing elsewhere", nm)
-		}
-		// A CID for an unsupported codec (e.g. dag-pb): the resolver does not
-		// intercept it, so it may be recorded as a name — the cross-store
-		// handle (see the function doc). `get`/`oci ls` of such a string
-		// resolves through the name index and cross-checks the digest.
-	}
-	return false, nil
 }
 
 // resolveDigest turns a get/cat argument into the blob's digest
