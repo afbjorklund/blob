@@ -26,14 +26,18 @@ import (
 // codec (same rule as `lookup`).
 // Every multiformat spelling comes from the go-multibase / go-multicodec /
 // go-multihash tables — none are hard-coded.
+//
+// `--base` overrides the first-line render (base32hex as given / as rendered
+// by default, or base16 / base64url / ... when set) — a learning/debugging
+// aid to see how the same CID assembles in another multibase.
 func runCid(cmd *cobra.Command, args []string) error {
 	arg := args[0]
 
 	var c cid.Cid
-	var echo string
+	fromCid := false
 	if p, err := cid.Parse(arg); err == nil {
 		c = p
-		echo = arg
+		fromCid = true
 	} else {
 		backend, err := getStorageBackend(storage.ReadOnly)
 		if err != nil {
@@ -45,11 +49,26 @@ func runCid(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("%q: not a CID or a name recorded in the index", arg)
 		}
-		c, err = cidForDigest(backend, d)
-		if err != nil {
-			return err
+		var err2 error
+		c, err2 = cidForDigest(backend, d)
+		if err2 != nil {
+			return err2
 		}
-		echo, err = cid.Render(c)
+	}
+
+	echo, err := cid.Render(c)
+	if err != nil {
+		return err
+	}
+	if fromCid {
+		echo = arg
+	}
+	if cmd.Flags().Changed("base") {
+		base, ok := multibase.Encodings[cidBase]
+		if !ok {
+			return fmt.Errorf("unknown base %q (a multibase name: base16, base32, base32hex, base36, base58btc, base64, base64url, ...)", cidBase)
+		}
+		echo, err = c.StringOfBase(base)
 		if err != nil {
 			return err
 		}

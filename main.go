@@ -29,6 +29,9 @@ var (
 	httpPass    string
 	// OCI import/export
 	ociName string
+
+	// cid
+	cidBase string
 )
 
 func defaultStorageType() string {
@@ -233,6 +236,8 @@ func main() {
 		Args:  cobra.ExactArgs(1),
 		RunE:  runCid,
 	}
+
+	cidCmd.Flags().StringVarP(&cidBase, "base", "", "base32hex", "render the first-line CID in this multibase (a name like base32hex, base16, base64url, base58btc)")
 
 	rootCmd.AddCommand(cidCmd)
 
