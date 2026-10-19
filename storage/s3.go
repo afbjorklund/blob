@@ -124,29 +124,38 @@ func (s *S3Storage) Put(hash Digest, size int64, r io.Reader) error {
 	return nil
 }
 
-func (s *S3Storage) Get(hash Digest) (io.ReadCloser, int64, error) {
+func (s *S3Storage) Get(hash Digest) (io.ReadCloser, int64, int64, error) {
 	obj, err := s.client.GetObject(context.Background(), s.bucket, s.blobKey(hash), minio.GetObjectOptions{})
 	if err != nil {
 		if isNoSuchKey(err) {
-			return nil, 0, errors.New("blob not found")
+			return nil, 0, 0, errors.New("blob not found")
 		}
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 
 	// GetObject defers the HTTP request to the first read, but Stat always
-	// performs it and returns the full object size; calling it before handing
-	// out the reader also surfaces the not-found case as an error here.
+	// performs it and returns the full object size and last-modified time;
+	// calling it before handing out the reader also surfaces the not-found
+	// case as an error here.
 	stat, err := obj.Stat()
 	if err != nil {
 		_ = obj.Close()
 		if isNoSuchKey(err) {
-			return nil, 0, errors.New("blob not found")
+			return nil, 0, 0, errors.New("blob not found")
 		}
-		return nil, 0, err
+		return nil, 0, 0, err
+	}
+
+	// stat.LastModified is the server's LastModified. A zero time.Time means
+	// the server did not send one — in that case return 0, the documented
+	// "unknown" sentinel; we do not fabricate one (e.g. time.Now()).
+	var mtime int64
+	if !stat.LastModified.IsZero() {
+		mtime = stat.LastModified.Unix()
 	}
 
 	// obj is an io.ReadCloser; closing it releases the open transfer.
-	return obj, stat.Size, nil
+	return obj, stat.Size, mtime, nil
 }
 
 func (s *S3Storage) Has(hash Digest) (bool, error) {

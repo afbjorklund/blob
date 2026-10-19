@@ -69,7 +69,11 @@ func (s storeSource) Get(d oci.Digest) (io.ReadCloser, int64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	return s.backend.Get(id)
+	// The store's Get returns (reader, size, mtime, err) — the third value
+	// is the blob's last-modified time. This adapter is used by the OCI
+	// import/export path which streams bytes, so we drop the mtime.
+	r, size, _, err := s.backend.Get(id)
+	return r, size, err
 }
 
 // layoutSource is a read side (blobs by digest) that can also yield its own
@@ -361,7 +365,7 @@ func runOCIExport(cmd *cobra.Command, args []string) error {
 	}
 	defer backend.Close()
 
-	indexReader, _, err := backend.Get(key)
+	indexReader, _, _, err := backend.Get(key)
 	if err != nil {
 		return err
 	}
@@ -442,7 +446,7 @@ func runOCILs(cmd *cobra.Command, args []string) error {
 	}
 	defer backend.Close()
 
-	indexReader, _, err := backend.Get(key)
+	indexReader, _, _, err := backend.Get(key)
 	if err != nil {
 		return err
 	}

@@ -49,8 +49,14 @@ const poolSize = 10
 // read-write open so a brand-new store becomes usable without a separate
 // migration step. A read-only open never runs these: it requires an already
 // initialized store (an existing database file).
+// The `mtime` column defaults to "now" (seconds since the Unix epoch) for
+// new rows inserted via this store's own Put. We are not using SQLite's
+// `CURRENT_TIMESTAMP` because it is ISO-8601 text; a plain integer is easier
+// to render in a header and to compare in a maintenance query. (SQLite
+// allows this: a DEFAULT expression must be parenthesised — bare function
+// names are rejected by the schema parser.)
 var initQueries = []string{
-	"CREATE TABLE IF NOT EXISTS blobs (hash BLOB PRIMARY KEY, data BLOB NOT NULL)",
+	"CREATE TABLE IF NOT EXISTS blobs (hash BLOB PRIMARY KEY, data BLOB NOT NULL, mtime INTEGER NOT NULL DEFAULT (strftime('%s','now')))",
 	"CREATE TABLE IF NOT EXISTS names (name TEXT PRIMARY KEY, hash BLOB NOT NULL REFERENCES blobs(hash))",
 }
 
@@ -189,46 +195,48 @@ func (s *SQLStorage) Put(hash Digest, size int64, r io.Reader) error {
 	return nil
 }
 
-func (s *SQLStorage) Get(hash Digest) (io.ReadCloser, int64, error) {
+func (s *SQLStorage) Get(hash Digest) (io.ReadCloser, int64, int64, error) {
 	conn, err := s.take(context.Background())
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 
 	var (
 		rowid int64
 		size  int64
+		mtime int64
 		found bool
 	)
 	qerr := sqlitex.ExecuteTransient(
 		conn,
-		"SELECT rowid, length(data) FROM blobs WHERE hash = ?",
+		"SELECT rowid, length(data), mtime FROM blobs WHERE hash = ?",
 		&sqlitex.ExecOptions{
 			Args: []any{hash},
 			ResultFunc: func(stmt *sqlite.Stmt) error {
 				found = true
 				rowid = stmt.ColumnInt64(0)
 				size = stmt.ColumnInt64(1)
+				mtime = stmt.ColumnInt64(2)
 				return nil
 			},
 		},
 	)
 	if qerr != nil {
 		s.put(conn)
-		return nil, 0, qerr
+		return nil, 0, 0, qerr
 	}
 	if !found {
 		s.put(conn)
-		return nil, 0, errors.New("blob not found")
+		return nil, 0, 0, errors.New("blob not found")
 	}
 
 	blob, err := conn.OpenBlob("", "blobs", "data", rowid, false)
 	if err != nil {
 		s.put(conn)
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 
-	return &connReader{blob: blob, conn: conn, put: s.put}, size, nil
+	return &connReader{blob: blob, conn: conn, put: s.put}, size, mtime, nil
 }
 
 func (s *SQLStorage) Has(hash Digest) (bool, error) {

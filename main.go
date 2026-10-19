@@ -22,6 +22,7 @@ var (
 	s3Region    string
 	outputPath  string
 	onlySize    bool
+	onlyMtime   bool
 	hashOnly    bool
 	listenAddr  string
 	httpUser    string
@@ -244,6 +245,7 @@ func main() {
 
 	getCmd.Flags().StringVarP(&outputPath, "output", "o", "", "output file path")
 	getCmd.Flags().BoolVarP(&onlySize, "only-size", "", false, "print only the blob size in bytes, do not retrieve the blob")
+	getCmd.Flags().BoolVarP(&onlyMtime, "only-mtime", "", false, "print only the blob's last-modified time in Unix seconds, do not retrieve the blob")
 
 	rootCmd.AddCommand(getCmd)
 
@@ -504,7 +506,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 	}
 	defer backend.Close()
 
-	reader, size, err := backend.Get(digest)
+	reader, size, mtime, err := backend.Get(digest)
 	if err != nil {
 		return err
 	}
@@ -512,6 +514,11 @@ func runGet(cmd *cobra.Command, args []string) error {
 
 	if onlySize {
 		fmt.Println(size)
+		return nil
+	}
+
+	if onlyMtime {
+		fmt.Println(mtime)
 		return nil
 	}
 
@@ -543,7 +550,7 @@ func runCat(cmd *cobra.Command, args []string) error {
 	}
 	defer backend.Close()
 
-	reader, _, err := backend.Get(digest)
+	reader, _, _, err := backend.Get(digest)
 	if err != nil {
 		return err
 	}

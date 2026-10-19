@@ -53,12 +53,16 @@ How it is organized (schema auto-created on first open, WAL mode for
 concurrent readers + writer):
 
 ```
-blobs ( hash BLOB PRIMARY KEY, data BLOB NOT NULL )   -- one row per blob
+blobs ( hash BLOB PRIMARY KEY, data BLOB NOT NULL, mtime INTEGER NOT NULL DEFAULT (strftime('%s','now')) )   -- one row per blob
 names ( name TEXT PRIMARY KEY, hash BLOB NOT NULL REFERENCES blobs(hash) )
 ```
 
 - `hash` in `blobs` is the multihash key; `names.hash` is a real foreign key
   to `blobs(hash)`, so the name→blob link is enforced at the DB level.
+- `mtime` is the blob's last-modified time in Unix seconds (defaulted to
+  "now" on insert; we do not use `CURRENT_TIMESTAMP` because it is ISO-8601
+  text rather than a plain integer, and a column we can compare in SQL is
+  easier to query).
 - Reads stream via the SQLite blob API (`OpenBlob`), so the blob is never
   loaded whole into memory.
 
@@ -96,6 +100,15 @@ Any other server (Apache `mod_autoindex` with a `AddOutputFormat` JSON
 directive, a reverse proxy that generates the same JSON, Ceph RGW's
 `?list-type=2` XML converted to the same shape, etc.) is fine as long as the
 directory GET returns the same JSON shape.
+
+A well-behaved server should return `Last-Modified` (RFC 7231) on the blob
+`GET` responses — that is how the backend learns the blob's last-modified time
+for the `Last-Modified` header the read-only gateway emits and for the
+`blob get --only-mtime` flag. If a server does not send it, the backend
+reports `0` ("unknown") rather than inventing one: the gateway then omits
+`Last-Modified`, and `--only-mtime` prints `0`. So adding the header to an
+existing server changes the observable output from "no time" to "a real
+time" — nothing else about the contract changes.
 
 ### nginx + htpasswd (Quick Start)
 

@@ -100,7 +100,7 @@ func newOCIRepo(backend storage.StorageBackend, repo string) (*ociRepo, error) {
 		return nil, err
 	}
 
-	r, _, err := backend.Get(key)
+	r, _, _, err := backend.Get(key)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +246,7 @@ func serveV2Manifest(w http.ResponseWriter, r *http.Request, obj *ociRepo, ref s
 		return
 	}
 
-	reader, _, err := obj.backend.Get(id)
+	reader, _, _, err := obj.backend.Get(id)
 	if err != nil {
 		ociError(w, http.StatusNotFound, "MANIFEST_UNKNOWN", d.String())
 		return
@@ -326,7 +326,7 @@ func serveV2Blob(w http.ResponseWriter, r *http.Request, obj *ociRepo, ref strin
 		return
 	}
 
-	reader, size, err := obj.backend.Get(id)
+	reader, size, _, err := obj.backend.Get(id)
 	if err != nil {
 		ociError(w, http.StatusNotFound, "BLOB_UNKNOWN", d.String())
 		return

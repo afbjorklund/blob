@@ -269,6 +269,12 @@ func newHTTPTestServer(t *testing.T) *httptest.Server {
 			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+			// A well-behaved server emits Last-Modified on blob GETs; a bare
+			// time.Now() is fine — the backend's contract is "a plausible
+			// RFC 7231 time", not a specific one (the dir/sql backends return
+			// their true stored mtime; this sim just needs to exercise the
+			// parse path without being flaky).
+			w.Header().Set("Last-Modified", nowRFC1123())
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(b)
 		case http.MethodHead:
@@ -280,6 +286,7 @@ func newHTTPTestServer(t *testing.T) *httptest.Server {
 				return
 			}
 			w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+			w.Header().Set("Last-Modified", nowRFC1123())
 			w.WriteHeader(http.StatusOK)
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -407,12 +414,15 @@ func TestRoundTrip(t *testing.T) { //nolint:gocyclo
 
 			// Get streams the exact bytes back.
 			for _, e := range entries {
-				r, size, err := w.Get(e.key)
+				r, size, mtime, err := w.Get(e.key)
 				if err != nil {
 					t.Fatalf("Get(%q): %v", e.key, err)
 				}
 				if size != int64(len(e.value)) {
 					t.Fatalf("Get(%q) size = %d; want %d", e.key, size, len(e.value))
+				}
+				if mtime <= 0 {
+					t.Fatalf("Get(%q) mtime = %d; want > 0 (the backend's last-modified time)", e.key, mtime)
 				}
 				got, rerr := io.ReadAll(r)
 				if err := r.Close(); err != nil {
@@ -569,7 +579,7 @@ func TestConcurrentReads(t *testing.T) {
 // readBlob streams a blob and returns its full content, closing the reader
 // (which returns the backend's pooled connection) on the way out.
 func readBlob(b StorageBackend, key Digest) ([]byte, error) {
-	r, _, err := b.Get(key)
+	r, _, _, err := b.Get(key)
 	if err != nil {
 		return nil, err
 	}

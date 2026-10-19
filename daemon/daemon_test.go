@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"blob/cid"
 	"blob/identity"
@@ -44,14 +45,20 @@ func (m *memBackend) Put(hash storage.Digest, size int64, r io.Reader) error {
 	return nil
 }
 
-func (m *memBackend) Get(hash storage.Digest) (io.ReadCloser, int64, error) {
+// testMtime is the (fixed) last-modified time the in-memory backend reports
+// for every blob, so the Last-Modified header the gateway emits is stable and
+// assertable. It is well past the Unix epoch, so the "0 means unknown" rule in
+// the gateway's serveBlob does not apply here.
+const testMtime = int64(1000000000)
+
+func (m *memBackend) Get(hash storage.Digest) (io.ReadCloser, int64, int64, error) {
 	m.mu.Lock()
 	b, ok := m.blobs[string(hash)]
 	m.mu.Unlock()
 	if !ok {
-		return nil, 0, errors.New("not found")
+		return nil, 0, 0, errors.New("not found")
 	}
-	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
+	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), testMtime, nil
 }
 
 func (m *memBackend) Has(hash storage.Digest) (bool, error) {
@@ -79,7 +86,7 @@ func (m *memBackend) Lookup(name string) (storage.Digest, error) {
 }
 
 func (m *memBackend) Peek(hash storage.Digest, n int) ([]byte, error) {
-	r, _, err := m.Get(hash)
+	r, _, _, err := m.Get(hash)
 	if err != nil {
 		return nil, err
 	}
@@ -434,6 +441,18 @@ func TestOCIServe(t *testing.T) { //nolint:gocyclo
 		}
 		if !bytes.Equal(b1, b2) {
 			t.Errorf("namespace bodies differ")
+		}
+	})
+
+	t.Run("blob exposes Last-Modified when the backend reports one", func(t *testing.T) {
+		// The /blob/<CID> surface surfaces the store's last-modified time via
+		// Last-Modified (RFC 7231), for the benefit of HTTP clients that do
+		// conditional GETs or maintenance tooling. The memBackend returns a
+		// fixed testMtime, so the expected header is deterministic.
+		_, _, hdr := doHTTP(t, http.MethodGet, srv.URL+"/blob/"+cidStr)
+		want := time.Unix(testMtime, 0).UTC().Format(http.TimeFormat)
+		if got := hdr.Get("Last-Modified"); got != want {
+			t.Fatalf("Last-Modified = %q, want %q", got, want)
 		}
 	})
 }

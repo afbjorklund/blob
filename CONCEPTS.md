@@ -133,8 +133,11 @@ Two read paths, one canonical:
 
 - `GET /blob/<CID>` — stream the bytes. The response is never buffered whole,
   and carries `Content-Digest: sha-256=…` (the stored multihash digest) so a
-  client can verify what it fetched, and `Content-Type` derived from the
-  CID's codec.
+  client can verify what it fetched, `Content-Type` derived from the CID's
+  codec, and `Last-Modified` (RFC 7231) with the store's last-modified time
+  for the blob — when it landed in the store — so HTTP clients can use
+  conditional requests and maintenance tooling can find old blobs. It is
+  omitted by backends that do not track one.
 - `GET /name/<name>` — resolve the name to its CID, then **302-redirect** to
   the canonical `/blob/<CID>`. It does not duplicate the serving path; it is
   the same name→blob pointer the dir backend keeps as a symlink on disk. A

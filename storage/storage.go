@@ -62,8 +62,11 @@ type StorageBackend interface {
 	// Get streams the stored blob. The returned ReadCloser is the reader;
 	// Close it to release it (the sql backend releases the pooled connection
 	// it was opened on, so Close must be called whether or not the read
-	// completed). The second value is the blob size in bytes.
-	Get(hash Digest) (io.ReadCloser, int64, error)
+	// completed). The second value is the blob size in bytes, the third the
+	// blob's last-modified time as Unix seconds (0 when the backend does not
+	// track it — in that case callers must treat the value as "unknown" and
+	// typically omit it from any output).
+	Get(hash Digest) (io.ReadCloser, int64, int64, error)
 	Has(hash Digest) (bool, error)
 	// Index records a name→hash association. On a read-only backend it
 	// always returns ErrReadOnly without touching the store.
