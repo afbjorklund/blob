@@ -226,6 +226,15 @@ func main() {
 
 	rootCmd.AddCommand(hashCmd)
 
+	cidCmd := &cobra.Command{
+		Use:   "cid <cid|name>",
+		Short: "Inspect a CID: version, codec, multihash and digest",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runCid,
+	}
+
+	rootCmd.AddCommand(cidCmd)
+
 	getCmd := &cobra.Command{
 		Use:   "get <cid|name>",
 		Short: "Retrieve a file from the blob store (by CID or indexed name)",
