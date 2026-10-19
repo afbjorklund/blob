@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/url"
@@ -429,12 +430,23 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	name := filepath.Base(filePath)
-	if err := backend.Index(name, digest); err != nil {
+	skip, err := checkName(name, digest)
+	if err != nil {
 		return err
+	}
+	if !skip {
+		if err := backend.Index(name, digest); err != nil {
+			return err
+		}
 	}
 
 	if has {
 		fmt.Printf("File already exists in store: %s\n", cidStr)
+		return nil
+	}
+
+	if skip {
+		fmt.Printf("Added: %s (name %q skipped: it is already the blob's own digest handle)\n", cidStr, name)
 		return nil
 	}
 
@@ -465,16 +477,83 @@ func runHash(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// checkName decides what happens when the index is about to record `nm`,
+// which resolves to the blob `target`. The invariant behind the rule: a name
+// that *looks* like a native handle (an OCI digest the store converts, or a
+// CID the store holds) is intercepted by the resolution order (CID →
+// sha256-digest → name) before the name index is ever consulted — a name
+// entry for it would be unreachable and misleading. So: such a name may be
+// recorded only if it resolves to exactly the blob being stored (and then it
+// is *skipped*, since the entry would be redundant with the direct address);
+// in every other form it is rejected. Names that the resolver will never
+// intercept — sha256 digests of other algorithms ("sha1:" etc., which no
+// resolver path converts) and CIDs for codecs the store doesn't hold (e.g. a
+// dag-pb CID from `ipfs add`, the "ipfs get → blob add" interop handle) —
+// are allowed to record as ordinary names.
+//
+// Separately: '/' is not a legal name character yet (it would make a
+// hierarchy: index/ subdirectories for dir, nested object keys for s3, path
+// segments for http — the FQDN-name story, deferred, see the plan in
+// AGENTS.md; see docs/names.md for the deferred plan); control
+// characters (\0 \n \r DEL) are rejected because no
+// backend can hold them.
+//
+// Returns (skip, err): skip=true means the blob is stored but no name entry
+// is written (the name is already the blob's own direct address); a plain
+// name is (false, nil) — record it.
+func checkName(nm string, target []byte) (bool, error) {
+	if nm == "" || nm == "." || nm == ".." {
+		return false, fmt.Errorf("invalid index name %q", nm)
+	}
+	if strings.ContainsRune(nm, '/') {
+		return false, fmt.Errorf("name %q contains a path separator; names in the index are flat (one level) — FQDN-style names need escaping that is not implemented yet", nm)
+	}
+	for _, c := range nm {
+		if c == 0 || c == '\n' || c == '\r' || c == 0x7f {
+			return false, fmt.Errorf("name %q contains a control character; names in the index cannot hold \\0, \\n or \\r", nm)
+		}
+	}
+	if id, err := identity.FromOCIString(nm); err == nil {
+		if bytes.Equal(id, target) {
+			return true, nil
+		}
+		return false, fmt.Errorf("%q is an OCI digest of another blob; a digest-shaped name is reserved as a direct handle and cannot point elsewhere", nm)
+	}
+	if c, err := cid.Parse(nm); err == nil {
+		if cid.Supported(cid.Codec(c)) {
+			if bytes.Equal(cid.Key(c), target) {
+				return true, nil
+			}
+			return false, fmt.Errorf("%q is a CID for a codec this store holds; the resolver intercepts it as that CID, so it cannot also be a name pointing elsewhere", nm)
+		}
+		// A CID for an unsupported codec (e.g. dag-pb): the resolver does not
+		// intercept it, so it may be recorded as a name — the cross-store
+		// handle (see the function doc). `get`/`oci ls` of such a string
+		// resolves through the name index and cross-checks the digest.
+	}
+	return false, nil
+}
+
 // resolveDigest turns a get/cat argument into the blob's digest
 // (multihash): parsed as a CID when possible (no backend needed), or
 // resolved via the read-only backend's name index otherwise.
+//
+// A CID whose codec the store does NOT hold (a dag-pb CID from `ipfs add`,
+// say) is *not a direct handle* in this store, but it still needs to be a
+// usable name — that's the interop path "ipfs get → blob add" produces. So
+// it goes through the name index; if a name entry was recorded (by
+// `add`/`oci import`), the digest must match the CID's own (or the store is
+// in an inconsistent state and we refuse to lie about it). Any other
+// argument that isn't a direct handle is resolved as a name, as before.
 func resolveDigest(arg string) (storage.Digest, error) {
+	var foreignCid cid.Cid
+	var isForeign bool
 	if c, err := cid.Parse(arg); err == nil {
-		digest, err := digestFromCID(c)
-		if err != nil {
-			return nil, err
+		if cid.Supported(cid.Codec(c)) {
+			return digestFromCID(c)
 		}
-		return digest, nil
+		foreignCid = c
+		isForeign = true
 	}
 	if id, err := identity.FromOCIString(arg); err == nil {
 		return id, nil
@@ -488,7 +567,13 @@ func resolveDigest(arg string) (storage.Digest, error) {
 
 	digest, err := backend.Lookup(arg)
 	if err != nil {
+		if isForeign {
+			return nil, fmt.Errorf("unsupported codec %q: this store only holds raw and json (and the name %q is not recorded)", cid.CodecName(cid.Codec(foreignCid)), arg)
+		}
 		return nil, fmt.Errorf("%q: name not found in index", arg)
+	}
+	if isForeign && !bytes.Equal(digest, cid.Key(foreignCid)) {
+		return nil, fmt.Errorf("name %q resolves to a different digest than the CID it is named after (store/index inconsistency)", arg)
 	}
 	return digest, nil
 }

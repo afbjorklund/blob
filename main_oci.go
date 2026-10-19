@@ -128,13 +128,26 @@ func firstByteCodec(b []byte) cid.Code {
 
 // resolveStoreKey turns an `oci get/ls` argument into the store key (identity)
 // of its root object: parsed as a CID when possible, else via the name index.
+//
+// A CID whose codec the store doesn't hold (a dag-pb CID from `ipfs add`,
+// for a dag-pb-wrapped layout) is *not* a direct handle here, but we still
+// let it through the name index — if a name entry was recorded under that
+// exact string by an earlier `oci import --name <that-foreign-CID>`, the
+// name lookup is how we reach it. The digest must match the CID's own
+// (or the store/index are inconsistent and we refuse to lie about it).
 func resolveStoreKey(arg string) (identity.Identity, error) {
+	var foreignCid cid.Cid
+	var isForeign bool
 	if c, err := cid.Parse(arg); err == nil {
-		key, err := digestFromCID(c)
-		if err != nil {
-			return nil, err
+		if cid.Supported(cid.Codec(c)) {
+			key, err := digestFromCID(c)
+			if err != nil {
+				return nil, err
+			}
+			return key, nil
 		}
-		return key, nil
+		foreignCid = c
+		isForeign = true
 	}
 	if id, err := identity.FromOCIString(arg); err == nil {
 		return id, nil
@@ -146,7 +159,13 @@ func resolveStoreKey(arg string) (identity.Identity, error) {
 	defer backend.Close()
 	key, err := backend.Lookup(arg)
 	if err != nil {
+		if isForeign {
+			return nil, fmt.Errorf("unsupported codec %q: this store only holds raw and json (and the name %q is not recorded)", cid.CodecName(cid.Codec(foreignCid)), arg)
+		}
 		return nil, fmt.Errorf("%q: name not found in index", arg)
+	}
+	if isForeign && !bytes.Equal(key, cid.Key(foreignCid)) {
+		return nil, fmt.Errorf("name %q resolves to a different digest than the CID it is named after (store/index inconsistency)", arg)
 	}
 	return key, nil
 }
@@ -339,14 +358,24 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 	if name == "" {
 		name = defaultName(args[0])
 	}
-	if err := backend.Index(name, indexKey); err != nil {
+	skip, err := checkName(name, indexKey)
+	if err != nil {
 		return err
+	}
+	if !skip {
+		if err := backend.Index(name, indexKey); err != nil {
+			return err
+		}
 	}
 
 	c := cid.Build(firstByteCodec(indexBytes), indexKey)
 	cidStr, err := cid.Render(c)
 	if err != nil {
 		return err
+	}
+	if skip {
+		fmt.Printf("Imported %d OCI blob(s); index %s (name %q skipped: it is already the layout's own digest handle)\n", len(reachable), cidStr, name)
+		return nil
 	}
 	fmt.Printf("Imported %d OCI blob(s); index %s (name %q)\n", len(reachable), cidStr, name)
 	return nil
