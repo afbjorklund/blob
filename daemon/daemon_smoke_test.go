@@ -99,7 +99,11 @@ func newImageLayout(t *testing.T, be storage.StorageBackend, name string) puller
 
 // newArtifactLayout wraps a bare payload as a single-layer OCI artifact
 // (index → manifest[artifactType] → `{}` config + layer) and stores it the way
-// `oci import` does for a bare file.
+// `oci import` does for a bare file, but keeps name→index (the layout's root
+// CID), which the daemon surfaces exercise as its own concern independent of
+// the CLI's naming policy (a bare-file import no longer records a basename, so
+// the name here is one explicitly recorded, as `oci import --name <n> <file>`
+// would do).
 func newArtifactLayout(t *testing.T, be storage.StorageBackend, name string) puller {
 	t.Helper()
 	payload := []byte("smoke artifact layer payload")
