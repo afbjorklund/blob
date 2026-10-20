@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"blob/index"
+
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -82,9 +84,14 @@ func (s *S3Storage) blobKey(hash Digest) string {
 	return hex.EncodeToString(hash)
 }
 
-// indexKey is the object key of a name index entry.
+// indexKey is the object key of a name index entry. The name is stored by its
+// *encoded segment* (index.Encode): a registry-style name like
+// "docker.io/library/busybox" becomes the single flat key
+// "index/docker.io%2Flibrary%2Fbusybox", so the index is one level of keys,
+// never a nested "index/a/b/c". Encode is the identity on names that need no
+// escaping, so plain names use exactly the key they did before.
 func (s *S3Storage) indexKey(name string) string {
-	return indexPrefix + "/" + name
+	return indexPrefix + "/" + index.Encode(name)
 }
 
 // isNoSuchKey reports whether err is a definitive "object does not exist"
@@ -229,12 +236,16 @@ func (s *S3Storage) Names() ([]string, error) {
 		}
 		// Strip the "index/" prefix and drop folder markers (a key with
 		// nothing else, which our own Index method never creates but a
-		// folder marker from another tool might).
+		// folder marker from another tool might). A name is always a single
+		// segment now (index.Encode), so a real '/' in the key means it was
+		// written by something other than this store — skip it.
 		rest := strings.TrimPrefix(obj.Key, indexPrefix+"/")
 		if rest == "" || strings.ContainsRune(rest, '/') {
 			continue
 		}
-		names = append(names, rest)
+		// Decode the segment back to the clean, user-facing name (identity on
+		// segments with no escapes, so plain names are unchanged).
+		names = append(names, index.Decode(rest))
 	}
 	sort.Strings(names)
 	return names, nil

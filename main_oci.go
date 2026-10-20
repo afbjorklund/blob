@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"blob/cid"
 	"blob/identity"
@@ -304,7 +305,7 @@ func registerOCICmds(root *cobra.Command) {
 		Args:    cobra.ExactArgs(1),
 		RunE:    runOCIAdd,
 	}
-	addCmd.Flags().StringVarP(&ociName, "name", "", "", "index name to record (default: basename of the argument)")
+	addCmd.Flags().StringArrayVarP(&ociNames, "name", "", []string{}, "index name to record (repeatable; the basename of the argument is always recorded as well, and each --name must be a flat clean name — a registry-style docker.io/library/busybox is allowed and stored as an encoded segment)")
 
 	getCmd := &cobra.Command{
 		Use:     "export <cid|name|digest> -o <dir | tar>",
@@ -355,31 +356,77 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	name := index.Name(ociName)
-	if name == "" {
-		name = index.Default(args[0])
-	}
-	skip, err := index.Check(name, indexKey)
-	if err != nil {
-		return err
-	}
-	if !skip {
-		if err := backend.Index(name, indexKey); err != nil {
-			return err
-		}
-	}
-
+	// The layout's own CID: the index bytes under the content-based codec
+	// (JSON for an index, which starts with '{'), rendered base32hex — the same
+	// value the old single-name print carried, and what the OCI surface serves.
 	c := cid.Build(firstByteCodec(indexBytes), indexKey)
 	cidStr, err := cid.Render(c)
 	if err != nil {
 		return err
 	}
-	if skip {
-		fmt.Printf("Imported %d OCI blob(s); index %s (name %q skipped: it is already the layout's own digest handle)\n", len(reachable), cidStr, name)
+
+	// The basename of the argument is always recorded, and each --name is
+	// recorded alongside it (repeatable). The two are de-duplicated, so
+	// `oci import x.tar --name x` records x once.
+	records, skipped, err := recordNames(index.Default(args[0]), ociNames, indexKey, backend)
+	if err != nil {
+		return err
+	}
+	if len(skipped) > 0 {
+		fmt.Printf("Imported %d OCI blob(s); index %s; recorded %d name(s), skipped %d (they are direct digests of the layout): %s\n",
+			len(reachable), cidStr, len(records), len(skipped),
+			strings.Join(append(append([]string{}, records...), skipped...), ", "))
 		return nil
 	}
-	fmt.Printf("Imported %d OCI blob(s); index %s (name %q)\n", len(reachable), cidStr, name)
+	fmt.Printf("Imported %d OCI blob(s); index %s; recorded %d name(s): %s\n",
+		len(reachable), cidStr, len(records), strings.Join(records, ", "))
 	return nil
+}
+
+// recordNames records the index names for an imported layout: every name in
+// `extras` plus the baseline `base` name (the basename of the argument), all
+// pointing at the same blob (identity). The two are de-duplicated, so
+// "oci import x.tar --name x" records x once. A name that `index.Check` flags
+// as the layout's own digest/CID handle is skipped (it is already the layout's
+// direct address) and reported separately; a name that Check rejects returns
+// an error (earlier names are left recorded, the same way the single-name
+// version left the layout blobs stored when it refused the name).
+func recordNames(base string, extras []string, key identity.Identity, backend storage.StorageBackend) (records, skipped []string, err error) {
+	seen := map[string]bool{}
+	record := func(nm string) error {
+		if seen[nm] {
+			return nil
+		}
+		seen[nm] = true
+		skip, cerr := index.Check(nm, key)
+		if cerr != nil {
+			return cerr
+		}
+		if skip {
+			skipped = append(skipped, nm)
+			return nil
+		}
+		if err := backend.Index(nm, key); err != nil {
+			return err
+		}
+		records = append(records, nm)
+		return nil
+	}
+
+	if base != "" {
+		if err = record(base); err != nil {
+			return records, skipped, err
+		}
+	}
+	for _, nm := range extras {
+		if nm == "" {
+			continue
+		}
+		if err = record(nm); err != nil {
+			return records, skipped, err
+		}
+	}
+	return records, skipped, nil
 }
 
 // runOCIExport writes a stored OCI layout to a directory or tar.

@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sort"
+
+	"blob/index"
 
 	"zombiezen.com/go/sqlite"
 	"zombiezen.com/go/sqlite/sqlitex"
@@ -274,10 +277,15 @@ func (s *SQLStorage) Index(name string, hash Digest) error {
 	}
 	defer s.put(conn)
 
+	// The `name` column holds the *encoded segment* (index.Encode), so the
+	// index stays a single flat column — a registry-style name is stored as
+	// "docker.io%2Flibrary%2Fbusybox", no hierarchy. Encode is the identity on
+	// names that need no escaping, so plain names are stored exactly as before.
+	seg := index.Encode(name)
 	return sqlitex.ExecuteTransient(
 		conn,
 		"INSERT OR REPLACE INTO names (name, hash) VALUES (?, ?)",
-		&sqlitex.ExecOptions{Args: []any{name, hash}},
+		&sqlitex.ExecOptions{Args: []any{seg, hash}},
 	)
 }
 
@@ -290,11 +298,15 @@ func (s *SQLStorage) Lookup(name string) (Digest, error) {
 
 	var hash []byte
 	found := false
+	// Match on the *encoded segment* — the same index.Encode step Index applied
+	// when writing — so "Lookup(docker.io/library/busybox)" finds the row stored
+	// under "docker.io%2Flibrary%2Fbusybox".
+	seg := index.Encode(name)
 	err = sqlitex.ExecuteTransient(
 		conn,
 		"SELECT hash FROM names WHERE name = ?",
 		&sqlitex.ExecOptions{
-			Args: []any{name},
+			Args: []any{seg},
 			ResultFunc: func(stmt *sqlite.Stmt) error {
 				h, rerr := io.ReadAll(stmt.ColumnReader(0))
 				if rerr != nil {
@@ -317,9 +329,13 @@ func (s *SQLStorage) Lookup(name string) (Digest, error) {
 }
 
 // Names lists the recorded names (the rows of the names table — the index,
-// not the CAS: blobs without a row are invisible). ORDER BY name gives the
-// contract's stable lexicographic order; an empty table is a zero rows, not
-// an error.
+// not the CAS: blobs without a row are invisible). An empty table is a zero
+// row, not an error. The rows hold *encoded segments* (the index.Encode step
+// applied in Index / Lookup), so each is decoded back to its clean name on the
+// way out. The result is re-sorted: the contract is the *clean-name* order,
+// which can differ from the segment order that "ORDER BY name" gives (a '%'
+// sorts below alphanumerics, so "a/b" → "a%2Fb" precedes "aX" in segment order
+// even though clean "a/b" < "aX").
 func (s *SQLStorage) Names() ([]string, error) {
 	conn, err := s.take(context.Background())
 	if err != nil {
@@ -330,14 +346,14 @@ func (s *SQLStorage) Names() ([]string, error) {
 	var names []string
 	err = sqlitex.ExecuteTransient(
 		conn,
-		"SELECT name FROM names ORDER BY name",
+		"SELECT name FROM names",
 		&sqlitex.ExecOptions{
 			ResultFunc: func(stmt *sqlite.Stmt) error {
 				b, rerr := io.ReadAll(stmt.ColumnReader(0))
 				if rerr != nil {
 					return rerr
 				}
-				names = append(names, string(b))
+				names = append(names, index.Decode(string(b)))
 				return nil
 			},
 		},
@@ -345,6 +361,7 @@ func (s *SQLStorage) Names() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	sort.Strings(names)
 	return names, nil
 }
 

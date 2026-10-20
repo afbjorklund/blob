@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -17,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"blob/index"
 )
 
 // sha256Multihash builds a well-formed sha2-256 multihash over data:
@@ -468,6 +471,157 @@ func TestRoundTrip(t *testing.T) { //nolint:gocyclo
 				t.Fatalf("second Close = %v; want nil", err)
 			}
 		})
+	}
+}
+
+// TestComplexNames is the shared contract for registry-style names across every
+// backend. The name set spans plain names, '/' (slash), '%' (percent), '@' and
+// ':' — the characters a `registry/namespace/image@sha256:…` handle brings. The
+// assertions are in the *clean* name the user sees; the backends are the ones
+// that convert to/from the encoded segment. This is the step-2 story: the user
+// always sees and types the clean name, so the shared contract only speaks the
+// clean name.
+func TestComplexNames(t *testing.T) {
+	for _, backend := range backendNames() {
+		t.Run(string(backend), func(t *testing.T) {
+			dir := t.TempDir()
+			path := pathFor(backend, dir)
+			bucket := ""
+			if backend == StorageHTTP {
+				path = newHTTPTestServer(t).URL
+			}
+			if backend == StorageS3 {
+				path = newS3TestServer(t).URL
+				bucket = s3TestBucket
+			}
+
+			key := sha256Multihash([]byte("blob-x"))
+			w := mustNew(t, backend, path, bucket, ReadWrite)
+
+			// Store the blob first: the sql backend's names table has a foreign
+			// key to blobs(hash), so a name may only point at a stored blob.
+			if err := w.Put(key, 6, bytes.NewReader([]byte("blob-x"))); err != nil {
+				t.Fatal(err)
+			}
+
+			// Index a set of names that span the new escape space.
+			names := []string{
+				"busybox",
+				"docker.io/library/busybox",
+				"50%off",
+				"a@sha256:abc",
+				"quay.io/org/img:latest",
+			}
+			for _, n := range names {
+				if err := w.Index(n, key); err != nil {
+					t.Fatalf("Index(%q): %v", n, err)
+				}
+			}
+
+			// Every recorded name resolves back to the same blob.
+			for _, n := range names {
+				if d, err := w.Lookup(n); err != nil || !bytes.Equal(d, key) {
+					t.Fatalf("Lookup(%q) = %q, %v; want %q", n, d, err, key)
+				}
+			}
+
+			// Last-add-wins re-point: a registry name now points at a different
+			// blob, and the lookup follows. The old plain name is untouched.
+			other := sha256Multihash([]byte("blob-y"))
+			if err := w.Put(other, 6, bytes.NewReader([]byte("blob-y"))); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Index("docker.io/library/busybox", other); err != nil {
+				t.Fatal(err)
+			}
+			if d, err := w.Lookup("docker.io/library/busybox"); err != nil || !bytes.Equal(d, other) {
+				t.Fatalf("Lookup(re-pointed) = %q, %v; want %q", d, err, other)
+			}
+			if d, err := w.Lookup("busybox"); err != nil || !bytes.Equal(d, key) {
+				t.Fatalf("Lookup(baseline plain name after re-point) = %q, %v; want %q", d, err, key)
+			}
+
+			// Names lists the index in the *clean* form, sorted, with no segment
+			// escapes leaking into the result.
+			ns, err := w.Names()
+			if err != nil {
+				t.Fatalf("Names(): %v", err)
+			}
+			got := map[string]bool{}
+			for _, n := range ns {
+				// The contract is "Names() returns the *clean* names, not the
+				// backend-internal segments". A clean name may legitimately
+				// contain '%' (it is a legal name character; we escape it to
+				// '%%' on the wire), and we do not escape any other characters.
+				// So the assertion is "no %2F" (our *only* escape for '/'),
+				// which is the marker of a leaked "encoded segment".
+				if strings.Contains(n, "%2F") {
+					t.Errorf("Names() leaked an encoded segment: %q (want the clean name)", n)
+				}
+				got[n] = true
+			}
+			for _, want := range names {
+				if !got[want] {
+					t.Errorf("Names() = %v; missing clean name %q", ns, want)
+				}
+			}
+			sorted := true
+			for i := 1; i < len(ns); i++ {
+				if ns[i-1] > ns[i] {
+					sorted = false
+					break
+				}
+			}
+			if !sorted {
+				t.Errorf("Names() = %v; want sorted by the clean name", ns)
+			}
+
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestDirSegmentPhysicalForm pins the on-disk shape of the two new index
+// entries: a name with '/' is a single file (one encoded segment) named by its
+// escape, not a hierarchy, and the plain name is unchanged. This is the
+// physical assertion the dir backend exists to satisfy, and the one that makes
+// the "no hierarchy" claim in docs/names.md checkable.
+func TestDirSegmentPhysicalForm(t *testing.T) {
+	dir := t.TempDir()
+	w := mustNew(t, StorageDir, dir, "", ReadWrite)
+	key := sha256Multihash([]byte("blob-z"))
+
+	// A registry-style name with '/'.
+	const reg = "docker.io/library/busybox"
+	if err := w.Index(reg, key); err != nil {
+		t.Fatal(err)
+	}
+	// A plain name for the comparison.
+	if err := w.Index("plain", key); err != nil {
+		t.Fatal(err)
+	}
+
+	// os.Lstat (not os.Stat): the index entry is a symlink and its target blob
+	// was not Put, so Stat would follow into a dangling target and ENOENT. We
+	// only care that the *entry* exists and is a symlink, and how it is named.
+	want := filepath.Join(dir, "index", index.Encode(reg))
+	st, err := os.Lstat(want)
+	if err != nil || st.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected a symlink at %q, lstat = %v", want, err)
+	}
+	// The old-style subdirectory must not exist (no hierarchy).
+	if _, err := os.Lstat(filepath.Join(dir, "index", "docker.io")); !os.IsNotExist(err) {
+		t.Errorf(`expected no "index/docker.io" entry (hierarchy), lstat = %v`, err)
+	}
+	// The plain name is stored under its own (unaltered) filename.
+	st, err = os.Lstat(filepath.Join(dir, "index", "plain"))
+	if err != nil || st.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected a symlink at index/plain, lstat = %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

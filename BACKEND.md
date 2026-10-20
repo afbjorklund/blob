@@ -83,6 +83,14 @@ GET  <base>/index/<name>     → hex multihash             (lookup)
 GET  <base>/index/           → JSON autoindex of names   (list names)
 ```
 
+`<name>` is the *encoded segment* per `index.Encode` (a registry-style name
+like `docker.io/library/busybox` is one flat URI segment on the wire —
+`docker.io%252Flibrary%252Fbusybox` after the client's URI escape, decoding to
+the file `docker.io%2Flibrary%2Fbusybox` the server stores, *not* a nested
+path). Plain names (no `/` or `%`) address exactly the URL they did before,
+and the `Names()` autoindex reports each entry by its encoded segment, which
+the client decodes to the clean name.
+
 `GET <base>/index/` (the directory listing, with the trailing slash) is the
 backend's `Names()` surface — the index contents as a JSON array of
 `{"name":..., "type":"file", ...}` entries. The server must have autoindex
@@ -180,6 +188,12 @@ is the hex multihash — a link, not a copy of the blob):
 <bucket>/<hex of multihash>        blob bytes
 <bucket>/index/<name>              body = hex multihash   (the name→hash link)
 ```
+
+`<name>` is the *encoded segment* (`index.Encode`), so a registry-style name
+is one flat object key — `index/docker.io%2Flibrary%2Fbusybox`, a single level,
+never a nested `index/docker.io/library/busybox`. `Lookup`/`Index` apply the
+same `Encode` step, so the key they send is identical; `Names()` lists with
+prefix `index/`, and decodes each key's segment to the clean name.
 
 ### Ceph RGW: create the key + bucket (once, as the operator)
 

@@ -9,15 +9,18 @@
 //     as identity.Identity is an alias of []byte and cid.Cid is an alias of
 //     go-cid's Cid; we only add conventions around the underlying value;
 //   - Check is the single place where the recordability rule is decided
-//     (flat, no control characters, native handles reserved);
+//     (no control characters, the encoded-segment length bound, native handles
+//     reserved);
 //   - Default derives the name to record from an argument (the basename,
-//     .tar/.tgz/.tar.gz suffix stripped).
-//
-// Names are flat today: no '/' (it would be a hierarchy: index/ subdirectories
-// for dir, nested object keys for s3, path segments for http). This package
-// is where the clean-name ↔ encoded-segment step for registry-style names is
-// added next (see docs/names.md), so the backends keep the index a single
-// level while users may name a blob `docker.io/library/busybox`.
+//     .tar/.tgz/.tar.gz suffix stripped);
+//   - Encode/Decode are the single source of truth for the clean-name ↔
+//     encoded-segment step. The index stays a single flat level in every
+//     backend (no index/ subdirectories, no nested S3 keys, no URL hierarchy),
+//     so a name that would otherwise need path separators — a registry-style
+//     name like `docker.io/library/busybox` or `busybox@sha256:…` — is stored
+//     as an *encoded segment* and exposed as a *clean name*. Encode is the
+//     identity on the names that were legal before it existed (no `/`, no `%`),
+//     so existing stores are untouched until such a name first appears.
 package index
 
 import (
@@ -49,11 +52,12 @@ type Name = string
 // dag-pb CID, cid.CodeDagPb, from `ipfs add`: the "ipfs get → blob add"
 // interop handle) — are allowed to record as ordinary names.
 //
-// Separately: '/' is not a legal name character yet (it would make a
-// hierarchy: index/ subdirectories for dir, nested object keys for s3, path
-// segments for http — the FQDN-name story, deferred, see docs/names.md);
-// control characters (\0 \n \r DEL) are rejected because no backend can hold
-// them.
+// '/' and '%' are legal name characters: they are the registry-style names
+// this store is meant to hold (docker.io/library/busybox, busybox@sha256:…),
+// and Encode turns them into a single flat segment so the backends never build
+// a hierarchy. Control characters (\0 \n \r DEL) are rejected because no
+// backend can hold them; the encoded segment length is bounded
+// (maxSegmentLen) so a dir-backend name stays within one POSIX name.
 //
 // Returns (skip, err): skip=true means the blob is stored but no name entry
 // is written (the name is already the blob's own direct address); a plain
@@ -62,8 +66,8 @@ func Check(nm Name, target identity.Identity) (skip bool, err error) {
 	if nm == "" || nm == "." || nm == ".." {
 		return false, fmt.Errorf("invalid index name %q", nm)
 	}
-	if strings.ContainsRune(nm, '/') {
-		return false, fmt.Errorf("name %q contains a path separator; names in the index are flat (one level) — FQDN-style names need escaping that is not implemented yet", nm)
+	if seg := Encode(nm); len(seg) > maxSegmentLen {
+		return false, fmt.Errorf("name %q encodes to a %d-byte segment; index names in this store must be at most %d bytes once encoded", nm, len(seg), maxSegmentLen)
 	}
 	for _, c := range nm {
 		if c == 0 || c == '\n' || c == '\r' || c == 0x7f {
@@ -90,6 +94,90 @@ func Check(nm Name, target identity.Identity) (skip bool, err error) {
 		// name index and cross-checks the digest.
 	}
 	return false, nil
+}
+
+// maxSegmentLen is the cap on the *encoded* form of a name (not on the clean
+// name). Rationale: POSIX NAME_MAX is 255 on essentially every Linux
+// filesystem (ext4, xfs, btrfs, zfs, f2fs, tmpfs), so the dir backend cannot
+// host a longer single file entry anyway; 255 is also well within sql's TEXT,
+// s3's 1024-byte key limit, and any URL segment. Enforced once in Check, so
+// every backend is held to the same bound by the one package that owns the
+// convention.
+const maxSegmentLen = 255
+
+// Encode is the clean name → encoded segment this store uses in its physical
+// index entries (a dir filename, a sql column, an http URL path segment, an s3
+// object key). It escapes '/' and '%' only — the two characters that are not
+// flat — using the standard URI percent convention, so the result is a single
+// filesystem/URL/key-safe segment and stays recognisable when eyeballed while
+// debugging:
+//
+//	'/' -> %2F   (docker.io/library/busybox -> docker.io%2Flibrary%2Fbusybox)
+//	'%' -> %%    (kept unambiguous on decode: the name a%2Fb != the name a/b)
+//	other -> itself   (':' '@' '.' digits and letters are fine in every backend)
+//
+// It is byte-wise (the escape chars are ASCII, so multibyte UTF-8 never
+// collides with an escape) and the identity on the names legal before it
+// existed (no '/', no '%') — so pre-existing stores are unaffected until a '/'
+// or '%' name first appears. It always round-trips exactly through Decode.
+func Encode(nm Name) string {
+	if !strings.ContainsAny(nm, "/%") {
+		return nm
+	}
+	var b strings.Builder
+	b.Grow(len(nm))
+	for _, r := range nm {
+		switch r {
+		case '/':
+			b.WriteString("%2F")
+		case '%':
+			b.WriteString("%%")
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// Decode is the tolerant encoded segment → clean name. It unescapes the only
+// encodings Encode produces — %2F -> / and %% -> % — and passes every other
+// byte through *literally*. In particular a '%' that does not begin %2F or %%
+// is treated as a literal '%', which is deliberate: it keeps pre-escape stores
+// (which may hold a raw '%' in a name, e.g. from before this step) readable
+// after the upgrade, instead of turning such a store into a wall of
+// "invalid name" errors.
+//
+// Decode(Encode(nm)) == nm for every name nm (strict round-trip); Decode is
+// the one direction where two different segments can map to one name (a raw
+// '%2F' stored before Encode existed decodes to 'a/b'), which is exactly the
+// legacy-tolerance contract and is why Encode stays strict about which bytes
+// it emits.
+func Decode(seg string) Name {
+	var b strings.Builder
+	b.Grow(len(seg))
+	for i := 0; i < len(seg); i++ {
+		if seg[i] != '%' {
+			b.WriteByte(seg[i])
+			continue
+		}
+		if i+1 < len(seg) {
+			switch seg[i+1] {
+			case '2':
+				if i+2 < len(seg) && seg[i+2] == 'F' {
+					b.WriteByte('/')
+					i += 2
+					continue
+				}
+			case '%':
+				b.WriteByte('%')
+				i++
+				continue
+			}
+		}
+		// A '%' not followed by the exact escape: pass through literally.
+		b.WriteByte('%')
+	}
+	return b.String()
 }
 
 // Default derives the index name to record from an argument path: its

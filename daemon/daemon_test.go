@@ -456,3 +456,75 @@ func TestOCIServe(t *testing.T) { //nolint:gocyclo
 		}
 	})
 }
+
+// TestNameSurface exercises the /name/<name> 302 for both a plain name and a
+// registry-style name. The daemon's contract: the client sends the clean name
+// (possibly URI-escaped on the wire, and possibly with a literal '/' in the
+// path) and the server resolves it to the blob, deriving the CID and 302ing
+// to /blob/<CID>. net/url decodes the request path once for us, so "net/url
+// gives us the clean name" is the whole server-side step. This is the
+// step-2 "user sees the clean name" contract on the wire, and the plain-name
+// line is the regression guard for pre-step-2 stores.
+func TestNameSurface(t *testing.T) {
+	be := newMemBackend()
+	l := buildTestLayout(t)
+
+	// Record two names: a plain one (regression) and a registry-style one
+	// (the step-2 feature). Same layout, different name — both must resolve
+	// to the same CID.
+	storeLayout(t, be, "busybox", l)
+	storeLayout(t, be, "docker.io/library/busybox", l)
+	srv := newTestServer(t, be)
+
+	idxKey, err := identity.FromOCI(l.indexDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCID, err := cid.Render(cid.Build(cid.CodeJson, idxKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantLocation := "/blob/" + wantCID
+
+	// The client can address the registry name with either a literal '/' (the
+	// common case, a user pasting the name into curl) or the URI-form
+	// percent-escape (%2F). Both arrive at the server as the same clean name,
+	// because net/url decodes the request path once before we touch it.
+	for _, path := range []string{
+		"/name/busybox",
+		"/name/docker.io/library/busybox",
+		"/name/docker.io%2Flibrary%2Fbusybox",
+	} {
+		req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Do NOT follow the redirect: we want to see the 302 and its Location.
+		client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		loc := resp.Header.Get("Location")
+		code := resp.StatusCode
+		_ = resp.Body.Close()
+		if code != http.StatusFound {
+			t.Errorf("GET %s = %d, want 302 (Location %q)", path, code, loc)
+		} else if loc != wantLocation {
+			t.Errorf("GET %s Location = %q, want %q", path, loc, wantLocation)
+		}
+	}
+	// A name that was never recorded still 404s. (A 404 does not redirect, so
+	// the default client is safe here.)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/name/no/such/name", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET unrecorded name = %d, want 404", resp.StatusCode)
+	}
+}

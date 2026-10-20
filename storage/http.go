@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"blob/index"
 )
 
 // indexPrefix is the on-wire path segment under which name index entries live
@@ -101,9 +103,23 @@ func (s *HTTPStorage) blobURL(hash Digest) string {
 	return s.baseURL.JoinPath(hex.EncodeToString(hash)).String()
 }
 
-// nameURL is the on-wire path of a name index entry.
+// nameURL is the on-wire path of a name index entry. The name is stored by its
+// *encoded segment* (index.Encode): a registry-style name like
+// "docker.io/library/busybox" becomes the single flat segment
+// "docker.io%2Flibrary%2Fbusybox", so the index stays one level (no hierarchy).
+// index.Encode is the identity on names that need no escaping, so plain names
+// address exactly the URL they did before.
+//
+// On top of that, the segment is put on the wire per URI percent-encoding
+// (url.PathEscape, layer B): the '%' in our own "%2F" becomes "%25" in flight
+// (a%2Fb on the wire is a%252Fb), and the server decodes once to recover the
+// segment. Without this second escape a static server would decode "%2F" to a
+// real path separator and split the one flat file into a hierarchy. JoinPath
+// takes the element already escaped (its contract), so PathEscape is the
+// correct half here — we never call PathUnescape, and a real server never
+// hands us raw percent escapes.
 func (s *HTTPStorage) nameURL(name string) string {
-	return s.baseURL.JoinPath(indexPrefix, name).String()
+	return s.baseURL.JoinPath(indexPrefix, url.PathEscape(index.Encode(name))).String()
 }
 
 // indexDirURL is the on-wire path of the name index *directory* (the trailing
@@ -381,7 +397,11 @@ func (s *HTTPStorage) Names() ([]string, error) {
 		if e.Type != "" && e.Type != "file" {
 			continue
 		}
-		names = append(names, e.Name)
+		// The autoindex reports each index file's *segment* on-disk name
+		// (index.Encode applied in Index); decode it to the clean, user-facing
+		// name. Decode is the identity on segments with no escapes, so plain
+		// names are returned exactly as before.
+		names = append(names, index.Decode(e.Name))
 	}
 	sort.Strings(names)
 	return names, nil

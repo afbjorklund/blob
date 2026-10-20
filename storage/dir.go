@@ -8,7 +8,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
+
+	"blob/index"
 )
 
 type DirStorage struct {
@@ -115,24 +118,31 @@ func (s *DirStorage) Has(hash Digest) (bool, error) {
 	return false, err
 }
 
-// Index stores a symlink index/<name> -> ../<b0>/<b1>/<b2>/<rest>
+// Index stores a symlink index/<segment> -> ../<b0>/<b1>/<b2>/<rest>
 // pointing at the blob, so following the entry directly yields the
 // content. The relative target is "../" + relPath, one "../" hop back to
 // the store root regardless of the fanout depth.
+//
+// The name is stored by its *encoded segment* (index.Encode): a registry-style
+// name like "docker.io/library/busybox" becomes the single file
+// "index/docker.io%2Flibrary%2Fbusybox", keeping the index one flat level.
+// Encode is the identity on names that need no escaping, so plain names are
+// written exactly as before.
 func (s *DirStorage) Index(name string, hash Digest) error {
 	if s.readOnly {
 		return ErrReadOnly
 	}
-	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, os.PathSeparator) {
+	if name == "" || name == "." || name == ".." {
 		return fmt.Errorf("invalid index name %q", name)
 	}
 
+	seg := index.Encode(name)
 	indexDir := filepath.Join(s.rootDir, "index")
 	if err := os.MkdirAll(indexDir, 0755); err != nil {
 		return err
 	}
 
-	dst := path.Join(indexDir, name)
+	dst := path.Join(indexDir, seg)
 	tmpPath := dst + ".tmp"
 
 	target := "../" + s.relPath(hash)
@@ -169,8 +179,12 @@ func isValidLinkPart(s string) bool {
 // entry must stay within the store and use only safe path characters;
 // beyond that, the key's exact length and alphabet are not assumed
 // (the multihash's algorithm + digest are opaque bytes to this backend).
+// The clean name is encoded to its segment (index.Encode) before the symlink
+// is read, so "Lookup(docker.io/library/busybox)" reads the on-disk entry
+// "index/docker.io%2Flibrary%2Fbusybox" that "Index" wrote.
 func (s *DirStorage) Lookup(name string) (Digest, error) {
-	link, err := os.Readlink(filepath.Join(s.rootDir, "index", name))
+	seg := index.Encode(name)
+	link, err := os.Readlink(filepath.Join(s.rootDir, "index", seg))
 	if err != nil {
 		return nil, err
 	}
@@ -198,10 +212,16 @@ func (s *DirStorage) Lookup(name string) (Digest, error) {
 
 // Names lists the index directory: one entry per recorded name, so the
 // CAS is not involved at all (blobs with no name are invisible, blobs
-// with several names list once per name). os.ReadDir returns the entries
-// sorted by name, which satisfies the contract's stable-order clause. A
-// store that has never been indexed (no index/ dir yet) is a legitimate
-// empty index, not an error.
+// with several names list once per name). A store that has never been
+// indexed (no index/ dir yet) is a legitimate empty index, not an error.
+//
+// Each on-disk entry is an *encoded segment*, so it is decoded back to the
+// clean name (index.Decode) before it is returned — listing is always in the
+// user-facing form. The segments are decoded and then re-sorted, because the
+// clean-name order is the contract and can differ from the raw segment order
+// (a '%' sorts below alphanumerics, so "a/b" → "a%2Fb" sits before "aX" in
+// segment order even though clean "a/b" < "aX" — re-sorting makes the result
+// match the clean-name order the contract promises).
 func (s *DirStorage) Names() ([]string, error) {
 	entries, err := os.ReadDir(filepath.Join(s.rootDir, "index"))
 	if err != nil {
@@ -212,8 +232,9 @@ func (s *DirStorage) Names() ([]string, error) {
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		names = append(names, e.Name())
+		names = append(names, index.Decode(e.Name()))
 	}
+	sort.Strings(names)
 	return names, nil
 }
 

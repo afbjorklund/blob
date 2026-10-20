@@ -30,7 +30,7 @@ var (
 	httpUser    string
 	httpPass    string
 	// OCI import/export
-	ociName string
+	ociNames []string
 
 	// cid
 	cidBase string
