@@ -463,6 +463,22 @@ func recordNames(base string, extras []string, key identity.Identity, backend st
 	return records, skipped, nil
 }
 
+// requireOCIShape checks the resolved blob is stored under the JSON codec —
+// via the same first-byte Peek the codec rule itself uses (so the blob is
+// never read, only one byte), not by parsing it. An OCI index is always
+// JSON, so a non-JSON blob is not a layout; naming it as such (rather than
+// dumping a raw decode error over its first bytes) is the whole point.
+func requireOCIShape(key identity.Identity, backend storage.StorageBackend) error {
+	first, err := peekFirstByte(backend, storage.Digest(key))
+	if err != nil {
+		return err
+	}
+	if cid.CodecForFirstByte(first) != cid.CodeJson {
+		return fmt.Errorf("not an OCI layout: the blob is not JSON, so it cannot be an index.json (it may have been added with `blob add`; `oci ls` needs the OCI index CID)")
+	}
+	return nil
+}
+
 // runOCIExport writes a stored OCI layout to a directory or tar.
 func runOCIExport(cmd *cobra.Command, args []string) error {
 	key, err := resolveStoreKey(args[0])
@@ -475,6 +491,10 @@ func runOCIExport(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer backend.Close()
+
+	if err := requireOCIShape(key, backend); err != nil {
+		return err
+	}
 
 	indexReader, _, _, err := backend.Get(key)
 	if err != nil {
@@ -539,6 +559,10 @@ func runOCILs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer backend.Close()
+
+	if err := requireOCIShape(key, backend); err != nil {
+		return err
+	}
 
 	indexReader, _, _, err := backend.Get(key)
 	if err != nil {
