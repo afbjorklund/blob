@@ -175,15 +175,16 @@ func resolveStoreKey(arg string) (identity.Identity, error) {
 // openLayoutSource opens arg as an OCI source: a directory layout, a tar
 // archive layout, or (falling back) a bare file wrapped as a single-layer
 // artifact. It returns the source, a closer the caller must invoke (nil
-// otherwise), and whether the bare-file path was taken — the bare file is an
-// artifact the store wraps, with the user's file as the single layer, while
-// a genuine layout (dir or tar) is the object itself and gets the basename
-// recorded in the name index (as `docker load` names the tarball it
-// consumed).
-func openLayoutSource(arg string) (layoutSource, func(), bool, error) {
+// otherwise), and the name target: the digest whose store key the name index
+// should record names against ("" for a genuine layout, which names its
+// index; for a wrapped bare file, the file's own bytes — the artifact's
+// single layer — so that a name recorded by `oci import f` and one recorded
+// by `blob add f` resolve to the same key and the OCI scaffolding is
+// addressed by its index CID, not by name).
+func openLayoutSource(arg string) (layoutSource, func(), oci.Digest, error) {
 	// A directory is an OCI layout.
 	if info, err := os.Stat(arg); err == nil && info.IsDir() {
-		return oci.NewDir(arg), nil, false, nil
+		return oci.NewDir(arg), nil, "", nil
 	}
 
 	// A file: try to read it as a tar layout (docker-save / podman-save output,
@@ -192,11 +193,11 @@ func openLayoutSource(arg string) (layoutSource, func(), bool, error) {
 	// whole file as a single-layer artifact.
 	f, err := os.Open(arg)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, "", err
 	}
 	if src, err := oci.NewTarFileSource(f); err == nil {
 		if _, err := src.IndexBytes(); err == nil {
-			return src, func() { _ = f.Close() }, false, nil
+			return src, func() { _ = f.Close() }, "", nil
 		}
 		// A manifest.json without an index.json is a legacy docker archive
 		// (e.g. `podman save` with no -f). We do not import that format's
@@ -213,28 +214,28 @@ func openLayoutSource(arg string) (layoutSource, func(), bool, error) {
 	// Not a tar layout: wrap the file as a single-layer artifact.
 	size, err := fileSize(arg)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, "", err
 	}
 	layerDigest := ociDigestOf(arg)
 	if layerDigest == "" {
-		return nil, nil, false, fmt.Errorf("oci: could not compute digest of %s", arg)
+		return nil, nil, "", fmt.Errorf("oci: could not compute digest of %s", arg)
 	}
 	// Sniff the first len(oci.SifMagic) bytes to pick the media types
 	// (SIF or generic). Bounded by 10 bytes; the file is not buffered.
 	head, err := readFirstBytes(arg, len(oci.SifMagic))
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, "", err
 	}
 	cfgMT, layerMT := oci.MediaTypesFor(head)
 	a, err := oci.NewArtifact(layerDigest, size, layerMT, layerMT, cfgMT)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, "", err
 	}
 	layer, err := openFile(arg)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, "", err
 	}
-	return &artifactSource{a: a, layer: layer, size: size}, func() { _ = layer.Close() }, true, nil
+	return &artifactSource{a: a, layer: layer, size: size}, func() { _ = layer.Close() }, layerDigest, nil
 }
 
 // fileSize returns the size of a regular file.
@@ -309,7 +310,7 @@ func registerOCICmds(root *cobra.Command) {
 		Args:    cobra.ExactArgs(1),
 		RunE:    runOCIAdd,
 	}
-	addCmd.Flags().StringArrayVarP(&ociNames, "name", "", []string{}, "index name to record (repeatable); for a layout the basename of the argument is recorded as well, for a bare file only the --name is recorded (a bare file's own bytes are named the way `blob add` names them, so no basename alias is added automatically)")
+	addCmd.Flags().StringArrayVarP(&ociNames, "name", "", []string{}, "additional index name to record (repeatable); the basename of the argument is always recorded as well — for a layout pointing at its index, for a bare file pointing at the file's own bytes (the artifact's single layer, the same key `blob add` uses)")
 
 	getCmd := &cobra.Command{
 		Use:     "export <cid|name|digest> -o <dir | tar>",
@@ -332,15 +333,16 @@ func registerOCICmds(root *cobra.Command) {
 }
 
 // runOCIAdd imports an OCI layout (or wraps a bare file as an artifact) into
-// the store. A genuine layout (dir or tar) is the imported object, so its
-// basename is recorded as its name (and each --name alongside); a bare file
-// is wrapped into OCI scaffolding whose name would point at the wrapper while
-// `blob add` of the same file points at the file's bytes — so no name is
-// recorded automatically: the artifact is reached by its printed index CID,
-// and a --name, if given, is an explicit alias (any collision with a `blob
-// add` name of the same file is the caller's documented last-add-wins choice).
+// the store and records names. The *name* always points at the object the user
+// handed us: for a layout (dir/tar) the layout's index, for a bare file the
+// file's own bytes (its single layer) — the same key `blob add` would record,
+// so a name from `oci import f` and one from `blob add f` cannot clobber each
+// other and `blob get f` keeps returning the file. Each --name is just an
+// additional alias of that same key. The printed CID is the layout's index —
+// the OCI scaffold — and is the object to `oci export`/`oci ls`/`oras pull`
+// the bare file in (its name is the file's, not the scaffold's).
 func runOCIAdd(cmd *cobra.Command, args []string) error {
-	src, closer, isBareFile, err := openLayoutSource(args[0])
+	src, closer, nameTarget, err := openLayoutSource(args[0])
 	if err != nil {
 		return err
 	}
@@ -369,62 +371,58 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// The layout's own CID: the index bytes under the content-based codec
-	// (JSON for an index, which starts with '{'), rendered base32hex — the
-	// same value the OCI surface serves, and the address for `oci export`
-	// / `oci ls` / `oras pull` of this layout.
+	// The layout's own CID: the index bytes under the content-based codec,
+	// rendered base32hex — the OCI scaffold's address, the object the daemon's
+	// /v2/ and /blob/ surfaces serve, and the handle for `oci export`/`ls`.
 	c := cid.Build(firstByteCodec(indexBytes), indexKey)
 	cidStr, err := cid.Render(c)
 	if err != nil {
 		return err
 	}
 
-	base := ""
-	if !isBareFile {
-		base = index.Default(args[0])
+	// Names record against the object given: the layout's index for a dir/tar,
+	// or the file's bytes (nameTarget) for a bare file, so `oci import f` and
+	// `blob add f` name the same key. A bare file takes its name straight from
+	// the basename — exactly what `blob add` uses — unlike a layout, whose
+	// `.tar`/`.tgz` suffix is stripped (`docker load` convention).
+	base := index.Default(args[0])
+	nameKey := indexKey
+	if nameTarget != "" {
+		base = filepath.Base(args[0])
+		nameKey, err = identity.FromOCI(nameTarget)
+		if err != nil {
+			return err
+		}
 	}
-	records, skipped, err := recordNames(base, ociNames, indexKey, backend)
+
+	records, skipped, err := recordNames(base, ociNames, nameKey, backend)
 	if err != nil {
 		return err
 	}
 
-	if isBareFile {
-		// Wrapped-file case: the file's bytes are addressed the way `blob add`
-		// addresses them; the imported artifact's own scaffold is reached by
-		// its CID. An explicit --name (if given) still records, and is the
-		// only name claimed here — the basename is not, so it cannot silently
-		// shadow or be shadowed by a `blob add` name for the same file.
-		if len(records) > 0 {
-			fmt.Printf("Imported %d OCI blob(s); index %s (name(s): %s)\n",
-				len(reachable), cidStr, strings.Join(records, ", "))
-		} else {
-			fmt.Printf("Imported %d OCI blob(s); index %s\n", len(reachable), cidStr)
-		}
-		return nil
-	}
 	if len(skipped) > 0 {
-		fmt.Printf("Imported %d OCI blob(s); index %s (names: %s; skipped: %s)\n",
+		fmt.Printf("Imported %d OCI blob(s); index %s; name %s; skipped %s (it is the blob's own handle)\n",
 			len(reachable), cidStr, strings.Join(records, ", "), strings.Join(skipped, ", "))
 		return nil
 	}
 	if len(records) == 1 {
-		fmt.Printf("Imported %d OCI blob(s); index %s (name %q)\n", len(reachable), cidStr, records[0])
+		fmt.Printf("Imported %d OCI blob(s); index %s; name %q\n", len(reachable), cidStr, records[0])
 		return nil
 	}
-	fmt.Printf("Imported %d OCI blob(s); index %s (names: %s)\n",
+	fmt.Printf("Imported %d OCI blob(s); index %s; names %s\n",
 		len(reachable), cidStr, strings.Join(records, ", "))
 	return nil
 }
 
-// recordNames records the index names for an imported layout: every name in
-// `extras` plus the baseline `base` name (for a real layout, the basename of
-// the argument; empty for a bare file, whose bytes are named by `blob add`'s
-// path, not by this OCI wrap), all pointing at the same blob (identity). The
-// two are de-duplicated, so "oci import x.tar --name x" records x once. A
-// name that `index.Check` flags as the layout's own digest/CID handle is
-// skipped (it is already the layout's direct address) and reported separately;
-// a name that Check rejects returns an error (earlier names are left recorded,
-// the same way the layout blobs stay stored when the name is refused).
+// recordNames records the index names for an import: the baseline `base`
+// name plus every `extras` entry, de-duplicated, all pointing at the same
+// blob key (`key`). For a layout (dir/tar) `key` is the layout's index and
+// `base` is its basename with the `.tar`-family suffix stripped; for a bare
+// file `key` is the file's own bytes (its single layer, the same key `blob
+// add` uses) and `base` is its literal basename. A name that `index.Check`
+// flags as the blob's own native handle (a sha256 digest or a CID of a held
+// codec that resolves to `key`) is *skipped* — it is redundant with the
+// blob's direct address — and reported separately.
 func recordNames(base string, extras []string, key identity.Identity, backend storage.StorageBackend) (records, skipped []string, err error) {
 	seen := map[string]bool{}
 	record := func(nm string) error {

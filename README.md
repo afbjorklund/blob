@@ -18,7 +18,7 @@ See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
 - **Read-only HTTP gateway** - A built-in `blob serve` command (like the IPFS HTTP gateway, but for this local store) serves `GET /blob/<CID>`, so a stable `blob://<CID>` scheme can be mapped to `http://<host>/blob/<CID>` without the client knowing the backend or storage path. Response carries `Content-Type` (from the CID codec), `Content-Length`, `Content-Digest: sha-256=…` (the stored multihash digest), and `Last-Modified` (RFC 7231, the store's last-modified time) so HTTP clients can use conditional requests and maintenance tooling can see when a blob was added. `GET /name/<name>` resolves the name and `302`-redirects to the canonical `/blob/<CID>`
 - **OCI distribution registry (pull)** - `blob serve` also speaks the OCI distribution *read* API under `/v2/`, so an already-imported layout can be pulled by stock clients (`podman pull docker://…`, `oras pull oras://…`, `skopeo`, buildkit) with no `oci export` step. The repository name is the CID the store already printed: `docker://host/blob/<CID>` (primary, the exact CID from `oci import`) or `docker://host/name/<name>` (secondary, the name index). The only tag is `latest` (→ the layout index); inner components are addressed by their `sha256:<hex>` digest, exactly as the OCI spec expects. Read-only (no push), no auth/HTTPS — treat the base as a trusted plain-HTTP registry (localhost by default)
 - **Name index** - A separate per-name index in each backend (symlink in the dir backend, foreign-keyed table in the sql backend, an `index/<name>` object holding the hash in the http/s3 backends) lets you resolve a name to the exact stored blob CID (e.g. `ubuntu_latest.sif` and `ubuntu_26.04.sif` both resolve to the same blob). Last add wins, so `latest`-style aliases update as new content is stored. `blob list` prints the recorded names (the index, not the CAS)
-  - **Registry-style names** - a name may contain `/`, `@`, `:`, `.` etc. (`docker.io/library/busybox`, `docker.io/library/busybox@sha256:…`). All backends keep the index one flat level for it: the name is stored as an *encoded segment* (`/` → `%2F`, `%` → `%%`), and the clean name is what every command takes and prints. `oci import` of a layout records the basename plus any `--name` (repeatable), all resolving to the same index CID; of a bare file it records only the explicit `--name`(s) it is given — the file's bytes are `add`'s to name, so no basename is recorded automatically
+  - **Registry-style names** - a name may contain `/`, `@`, `:`, `.` etc. (`docker.io/library/busybox`, `docker.io/library/busybox@sha256:…`). All backends keep the index one flat level for it: the name is stored as an *encoded segment* (`/` → `%2F`, `%` → `%%`), and the clean name is what every command takes and prints. `oci import` of a layout records the basename plus any `--name` (repeatable), all resolving to the layout's index CID; of a bare file the same names resolve to the *file's own bytes* (the artifact's single layer, the same key `blob add` uses) — the file is named consistently regardless of which command stores it
 
 ## Usage
 
@@ -104,10 +104,9 @@ blob oci import oci-save/busybox       # a directory layout
 blob oci import busybox.tar            # a docker/podman save tar (hybrid OK)
 
 # Import a bare file as a single-layer OCI artifact (config = {}, one layer):
-# the artifact is named only via explicit --name (its bytes are already
-# addressable by the `blob add` name, so no automatic basename name is added):
-blob oci import myapp.sif              # prints the index CID only
-blob oci import myapp.sif --name myapp # additionally record the name → index CID
+# the name (basename + any --name) points at the file's bytes (same key as
+# `blob add`), and the printed CID is the OCI scaffold's address:
+blob oci import myapp.sif
 
 # Give the imported layout a registry-style name (or several). The basename
 # (busybox) is always recorded too, and each --name is recorded alongside it;

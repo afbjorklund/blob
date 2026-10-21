@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -76,11 +77,15 @@ func TestServeSmoke(t *testing.T) {
 // facts the smoke protocol needs: the name it is indexed under, the outer
 // (index-root) CID, the root object (the index bytes), and the root's OCI
 // digest (addressable at the /v2/ blobs endpoint like any reachable blob).
+// nameIsIndex is false for a stored artifact's file-name (which, by the
+// CLI's naming policy, points at the file's bytes rather than the scaffold)
+// — the by-name subtests then skip for that puller.
 type puller struct {
-	name      string
-	cid       string
-	idx       []byte
-	idxDigest oci.Digest
+	name        string
+	cid         string
+	idx         []byte
+	idxDigest   oci.Digest
+	nameIsIndex bool
 }
 
 // newImageLayout builds a minimal OCI image (index → manifest → config + layer)
@@ -94,16 +99,17 @@ func newImageLayout(t *testing.T, be storage.StorageBackend, name string) puller
 	storeDigest(t, be, l.configDigest, l.configBytes)
 	storeDigest(t, be, l.layerDigest, l.layerBytes)
 	storeName(t, be, name, l.indexDigest)
-	return puller{name: name, cid: outerCID(t, be, name), idx: l.indexBytes, idxDigest: l.indexDigest}
+	return puller{name: name, cid: outerCID(t, be, name), idx: l.indexBytes, idxDigest: l.indexDigest, nameIsIndex: true}
 }
 
 // newArtifactLayout wraps a bare payload as a single-layer OCI artifact
-// (index → manifest[artifactType] → `{}` config + layer) and stores it the way
-// `oci import` does for a bare file, but keeps name→index (the layout's root
-// CID), which the daemon surfaces exercise as its own concern independent of
-// the CLI's naming policy (a bare-file import no longer records a basename, so
-// the name here is one explicitly recorded, as `oci import --name <n> <file>`
-// would do).
+// (index → manifest[artifactType] → `{}` config + layer) and stores it. Under
+// the CLI's naming policy (`oci import <file>`) a bare file's name points at
+// the *file's bytes* (consistent with `blob add`), not at this scaffold — so
+// the name here records against the payload, not `a.IndexDigest`, and the
+// OCI-by-`name/...` subtest in `serveProtocol` does not run for artifacts.
+// The scaffold remains reachable by its CID, the same way it is reachable by
+// a name for images where the name does in fact point at the index.
 func newArtifactLayout(t *testing.T, be storage.StorageBackend, name string) puller {
 	t.Helper()
 	payload := []byte("smoke artifact layer payload")
@@ -117,8 +123,34 @@ func newArtifactLayout(t *testing.T, be storage.StorageBackend, name string) pul
 	storeDigest(t, be, a.ManifestDigest, a.ManifestBytes)
 	storeDigest(t, be, a.ConfigDigest, oci.EmptyConfig) // the `{}` config
 	storeDigest(t, be, a.LayerDigest, payload)
-	storeName(t, be, name, a.IndexDigest)
-	return puller{name: name, cid: outerCID(t, be, name), idx: a.IndexBytes, idxDigest: a.IndexDigest}
+	storeName(t, be, name, a.LayerDigest)
+	return puller{name: name, cid: outerCIDByIndex(t, be, a.IndexDigest), idx: a.IndexBytes, idxDigest: a.IndexDigest, nameIsIndex: false}
+}
+
+// outerCIDByIndex derives the CID for a known index digest (without a name to
+// look up): the index bytes under their content codec, rendered base32hex —
+// the same address `oci import` prints and the /v2/blob surface serves.
+func outerCIDByIndex(t *testing.T, be storage.StorageBackend, idxD oci.Digest) string {
+	t.Helper()
+	id, err := identity.FromOCI(idxD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _, _, err := be.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := cid.Build(cid.CodecForFirstByte(b[0]), id)
+	s, err := cid.Render(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
 }
 
 // outerCID is a layout's outer (index-root) CID — what `blob oci import`
@@ -185,6 +217,11 @@ func serveProtocol(t *testing.T, base string, p puller) {
 	})
 
 	t.Run("HTTP name → 302 → /blob/<CID>", func(t *testing.T) {
+		if !p.nameIsIndex {
+			// A wrapped artifact's name resolves to the file's bytes (raw),
+			// not the OCI scaffold — the 302 target is a raw CID, not p.cid.
+			t.Skip("artifact name points at the file's bytes, not the index CID")
+		}
 		code, loc, err := curlHead(t, base+"/name/"+p.name)
 		if err != nil || code != "302" {
 			t.Fatalf("GET /name/%s = (%s): %v; want 302", p.name, code, err)
@@ -206,6 +243,11 @@ func serveProtocol(t *testing.T, base string, p puller) {
 	})
 
 	t.Run("OCI root by name (X-Blob-Cid)", func(t *testing.T) {
+		if !p.nameIsIndex {
+			// The artifact's name resolves to file bytes; the OCI by-name
+			// surface would try to parse them as an index and 404.
+			t.Skip("artifact name points at the file's bytes, not the index")
+		}
 		body, hdr, code, err := curlGET(t, base+"/v2/name/"+p.name+"/manifests/latest")
 		if err != nil || code != "200" {
 			t.Fatalf("GET /v2/name/<name>/manifests/latest = %q (%s): %v; want 200", body, code, err)
