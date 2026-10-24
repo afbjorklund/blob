@@ -17,14 +17,14 @@ Two things to keep in mind for the remote backends:
 
 The default. No server to run; it reads and writes a normal directory.
 
-```
+```bash
 blob -s dir add file.sif            # default --path is ./.blob-store
 blob -s dir --path /srv/store add file.sif
 ```
 
 How it is organized (created automatically, no migration steps):
 
-```
+```text
 <--path>/
 ├── 12/20/…/<rest>          # one file per blob, fanned out by the first 3 key
 │                           # bytes into 1-byte dirs (<b0>/<b1>/<b2>/<rest>)
@@ -44,7 +44,7 @@ How it is organized (created automatically, no migration steps):
 
 `--path` is the database *file*. Single file, no server, no extra config.
 
-```
+```bash
 blob -s sql add file.sif           # default --path is ./.blob-store (a dir)
 blob -s sql --path /srv/store.db add file.sif
 ```
@@ -52,7 +52,7 @@ blob -s sql --path /srv/store.db add file.sif
 How it is organized (schema auto-created on first open, WAL mode for
 concurrent readers + writer):
 
-```
+```sql
 blobs ( hash BLOB PRIMARY KEY, data BLOB NOT NULL, mtime INTEGER NOT NULL DEFAULT (strftime('%s','now')) )   -- one row per blob
 names ( name TEXT PRIMARY KEY, hash BLOB NOT NULL REFERENCES blobs(hash) )
 ```
@@ -74,7 +74,7 @@ this client just issues `PUT` (add), `GET`/`HEAD` (get/lookup/serve).
 On-wire layout the server must serve (blobs at `<base>/<hex>`, name index at
 `<base>/index/<name>` — the index body is the hex multihash, not the blob):
 
-```
+```text
 PUT  <base>/<hex>            body = blob bytes          (add)
 GET  <base>/<hex>            → blob bytes               (get)
 HEAD <base>/<hex>            → 200 / 404                 (existence check)
@@ -169,7 +169,7 @@ time" — nothing else about the contract changes.
    blob -s http -p http://blob.localhost:8080 -u blob -P <pass> get file.sif -o out.sif
    ```
 
-For more on `auth_basic`/`htpasswd`, see the nginx docs (http://nginx.org/en/docs/).
+For more on `auth_basic`/`htpasswd`, see the nginx docs (<http://nginx.org/en/docs/>).
 
 ## `s3` — one object bucket (primary target: Ceph RGW)
 
@@ -184,7 +184,7 @@ named store inside it. This backend speaks the S3 object API (PUT/GET/HEAD on
 In-bucket layout (blobs and name index are *separate objects*, the index body
 is the hex multihash — a link, not a copy of the blob):
 
-```
+```text
 <bucket>/<hex of multihash>        blob bytes
 <bucket>/index/<name>              body = hex multihash   (the name→hash link)
 ```
@@ -217,23 +217,23 @@ blob -s s3 --path 127.0.0.1:7480 --bucket blobstore add file.sif
 blob -s s3 --path 127.0.0.1:7480 --bucket blobstore get file.sif -o out.sif
 ```
 
-For more on RGW / Ceph, see the Ceph docs (https://docs.ceph.com/).
+For more on RGW / Ceph, see the Ceph docs (<https://docs.ceph.com/>).
 
 ### Credentials, by backend
 
-| flag          | `http` (Basic auth)        | `s3` (SigV4)                |
-|---------------|----------------------------|-----------------------------|
-| `--user`/`BLOB_USER`   | username / token | S3 access key |
-| `--pass`/`BLOB_PASS`   | secret / token   | S3 secret key |
-| `~/.netrc` (per host)  | accepted by both backends |   |
+| flag                  | `http` (Basic auth)       | `s3` (SigV4)  |
+|-----------------------|---------------------------|---------------|
+| `--user`/`BLOB_USER`  | username / token          | S3 access key |
+| `--pass`/`BLOB_PASS`  | secret / token            | S3 secret key |
+| `~/.netrc` (per host) | accepted by both backends |               |
 
 Also available (s3 only): `--region` / `BLOB_S3_REGION`. Unset by default —
 minio-go then defers to the server's bucket location (fine for RGW, MinIO, and
 Ceph). Set it for region-aware deployments such as AWS where the region takes
 part of the SigV4 signature (e.g. `--region us-west-2`).
 
-For more on the S3 API / SigV4, see the AWS S3 docs (https://aws.amazon.com/s3/)
-or MinIO (https://min.io/docs/minio/).
+For more on the S3 API / SigV4, see the AWS S3 docs (<https://aws.amazon.com/s3/>)
+or MinIO (<https://min.io/docs/minio/>).
 
 ## Smoke tests
 
@@ -243,10 +243,10 @@ shims (in-memory `httptest` servers) already cover the protocol shape, so the
 smoke tests exist to verify the *real* thing: network round-trips, a real
 filesystem under the `dir` backend, real SigV4 signing for `s3`, etc.
 
-| test          | env var           | verifies                                                   |
-|---------------|-------------------|------------------------------------------------------------|
-| `TestDirSmoke`  | `BLOB_DIR_PATH`   | a real directory: plain fs, NFS/CIFS, FUSE (rclone, sshfs, …) |
-| `TestHTTPSmoke` | `BLOB_HTTP_PATH`  | a real HTTP server speaking the on-wire contract above     |
+| test            | env var                               | verifies                                                          |
+|-----------------|---------------------------------------|-------------------------------------------------------------------|
+| `TestDirSmoke`  | `BLOB_DIR_PATH`                       | a real directory: plain fs, NFS/CIFS, FUSE (rclone, sshfs, …)     |
+| `TestHTTPSmoke` | `BLOB_HTTP_PATH`                      | a real HTTP server speaking the on-wire contract above            |
 | `TestS3Smoke`   | `BLOB_S3_ENDPOINT` + `BLOB_S3_BUCKET` | a real S3 / Ceph RGW endpoint (creds via `BLOB_USER`/`BLOB_PASS`) |
 
 All three check the same contract: `Put` → `Peek` (first bytes) → name

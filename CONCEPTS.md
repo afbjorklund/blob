@@ -42,7 +42,7 @@ In `blob`, the CID is CIDv1 rendered in **base32hex** — a 5-bits-per-character
 multibase encoding using the alphabet `0-9a-v` (whose first 16 characters,
 `0-9a-f`, are exactly base16hex), e.g.
 
-```
+```text
 v05ah4859p5vrofmfpdv5i8om998c9k4gd0ge2shctr5jofc6ufj3ghgf8k
 ```
 
@@ -123,10 +123,10 @@ talk to the whole network; `blob serve` does the same over one store you point
 at — a **read-only** gateway:
 
 ```console
-$ blob serve                       # default 127.0.0.1:8080
+blob serve                       # default 127.0.0.1:8080
 
-$ curl http://127.0.0.1:8080/blob/v05ah48...j3ghgf8k
-$ curl -L http://127.0.0.1:8080/name/ubuntu_latest.sif
+curl http://127.0.0.1:8080/blob/v05ah48...j3ghgf8k
+curl -L http://127.0.0.1:8080/name/ubuntu_latest.sif
 ```
 
 Two read paths, one canonical:
@@ -156,11 +156,11 @@ familiar. All three rest on the same idea — *identify content by a hash of it
 rather than by where it sits* — and so all three deduplicate the same bytes and
 can hand you a stable handle plus a mutable alias on top:
 
-|                | stable content handle | mutable name      | how you reach it                |
-|----------------|-----------------------|-------------------|---------------------------------|
-| `ipfs://`      | CID                   | IPNS / DNS-link   | peer network — **discover** peer|
-| `oras://`      | digest (+ manifest)   | tag               | a **registry** you push/pull to |
-| `blob://`      | CID                   | name index        | a **store** you point `--path` at|
+|           | stable content handle | mutable name    | how you reach it                  |
+|-----------|-----------------------|-----------------|-----------------------------------|
+| `ipfs://` | CID                   | IPNS / DNS-link | peer network — **discover** peer  |
+| `oras://` | digest (+ manifest)   | tag             | a **registry** you push/pull to   |
+| `blob://` | CID                   | name index      | a **store** you point `--path` at |
 
 Read the last column as the difference that matters. They share *how content
 is addressed*; they differ in *how content is found and fetched*:
