@@ -73,15 +73,42 @@ See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
 
 ## Usage
 
-### Compute hash only
+### Compute / verify hashes (like `sha256sum`, but CIDs)
 
 ```bash
-blob hash <file>
+blob hash <file>...            # print one line per file:  <cid>  <file>
+blob hash -c <list> [<list>...]# verify the lines of a checksum list against local files
+blob hash -c -i <list>         # -i/--ignore-missing: skip files that are not present
 ```
 
-Prints the CID `sha256sum`-style (`<cid>  <file>`) without storing. A
-convenience so you don't need a shell wrapper to turn a file into an address
-(same family as `lookup` and `ipfs add --only-hash`).
+**Compute.** `blob hash <file>...` prints each file's CID `sha256sum`-style —
+`<cid>  <file>` (two spaces), one line per file — without storing anything. A
+convenience so you don't need a shell wrapper to turn files into addresses
+(same family as `lookup` and `ipfs add --only-hash`). Files are hashed
+independently: an unreadable file reports its own `Error:` line and a
+non-zero exit, but the other files still produce their lines.
+
+**Verify.** `blob hash -c <list>` reads one or more checksum lists whose lines
+are `<cid>  <file>` (exactly the shape of `blob hash` output) and, for each
+line, recomputes the *local* `file`'s CID and reports
+
+- `<file>: OK` — the local file hashes to the CID on the line;
+- `<file>: FAILED` — the file is there but its content differs;
+- `<file>: FAILED open or read` — the file could not be read (missing, etc.)
+
+and exits non-zero if any entry fails or is unreadable. Blank and `#`-comment
+lines are skipped. It never touches the store: verification hashes the named
+local file in place (we do not yet verify against the blob store).
+
+Unlike `sha256sum`, each line records the **full CID** — it carries the hash
+algorithm *and* the codec — so `-c` needs no digest-style parsing and has no
+"improperly formatted" lines; `sha256sum` only says "64 hex chars" and must
+assume they are SHA-256.
+
+`-i` / `--ignore-missing` skips entries whose file cannot be read instead of
+failing with a `FAILED open or read` line — the common case of a checksums file
+covering every arch while only one arch's file is locally present. A genuine
+content mismatch is still reported and still fails.
 
 ### Add to blob store
 

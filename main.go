@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -26,6 +27,8 @@ var (
 	onlySize    bool
 	onlyMtime   bool
 	hashOnly    bool
+	hashCheck   bool
+	hashIgnore  bool
 	listenAddr  string
 	httpUser    string
 	httpPass    string
@@ -224,11 +227,29 @@ func main() {
 	rootCmd.AddCommand(addCmd)
 
 	hashCmd := &cobra.Command{
-		Use:   "hash <file>",
-		Short: "Compute and print the CID of a file without storing it",
-		Args:  cobra.ExactArgs(1),
-		RunE:  runHash,
+		Use:   "hash <file>...",
+		Short: "Compute and print the CID of each file without storing it",
+		Long: `Compute and print the CID of each given file, one per line (like sha256sum):
+  <CID>  <file>
+
+With -c/--check the argument is instead a checksum list (one <CID>  <file> per
+line, as produced by hash) and each line is verified against the local file
+named on it, reporting one line per entry (<file>: OK, <file>: FAILED, or
+<file>: FAILED open or read for a file that could not be read). -i/--ignore-
+missing skips files that cannot be read instead of failing with a WARNING.
+The store is never consulted: files are only read and hashed in place.
+
+The checksum list records the full CID (not a bare digest), so it is self-
+describing — it carries the algorithm and codec. It therefore does not read a
+digest the way sha256sum does (which must assume sha256); no --base or
+--strict-style parsing is needed, and there are no 'improperly formatted'
+lines.`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: runHash,
 	}
+
+	hashCmd.Flags().BoolVarP(&hashCheck, "check", "c", false, "verify the lines of a checksum list (each <CID>  <file>) against the local files named on them")
+	hashCmd.Flags().BoolVarP(&hashIgnore, "ignore-missing", "i", false, "with -c, skip files that cannot be read (no WARNING, not counted as a failure)")
 
 	rootCmd.AddCommand(hashCmd)
 
@@ -385,17 +406,11 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	mc, err := detectCodec(filePath)
+	c, err := cidForFile(filePath)
 	if err != nil {
 		return err
 	}
 
-	mh, err := computeHash(filePath)
-	if err != nil {
-		return err
-	}
-
-	c := cid.Build(mc, mh)
 	cidStr, err := cid.Render(c)
 	if err != nil {
 		return err
@@ -455,27 +470,171 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runHash(cmd *cobra.Command, args []string) error {
-	filePath := args[0]
-
+// cidForFile computes (but does not store) the file's CID: peek the first byte
+// for the codec (cidForFile's content-based rule), hash the rest, compose the
+// CID. It is the pure content→CID half shared by hash (hash many files),
+// hash -c (verify a checksum list against local files), and add's --only-hash.
+func cidForFile(filePath string) (cid.Cid, error) {
 	mc, err := detectCodec(filePath)
 	if err != nil {
-		return err
+		return cid.Cid{}, err
 	}
 
 	mh, err := computeHash(filePath)
 	if err != nil {
-		return err
+		return cid.Cid{}, err
 	}
 
-	c := cid.Build(mc, mh)
-	cidStr, err := cid.Render(c)
-	if err != nil {
-		return err
+	return cid.Build(mc, mh), nil
+}
+
+func runHash(cmd *cobra.Command, args []string) error {
+	if hashCheck {
+		return runHashCheck(args)
 	}
 
-	fmt.Printf("%s  %s\n", cidStr, filePath)
+	// hash: one line per file, <CID>  <file>, like sha256sum.
+	failed := false
+	for _, filePath := range args {
+		c, err := cidForFile(filePath)
+		if err != nil {
+			failed = true
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			continue
+		}
+		cidStr, err := cid.Render(c)
+		if err != nil {
+			failed = true
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			continue
+		}
+		fmt.Printf("%s  %s\n", cidStr, filePath)
+	}
+	if failed {
+		return fmt.Errorf("at least one file could not be hashed")
+	}
 	return nil
+}
+
+// runHashCheck verifies the lines (each <CID>  <file>) of one or more checksum
+// lists (the arguments) against the local files named on them, reporting one
+// line per entry. It never touches the store: each entry hashes the named
+// local file and compares the CID it recomputes to the CID on the line.
+//
+// The CID on the line is canonical (base32hex, raw/json) — the exact output of
+// `hash` — so we simply parse it and CID-compare it to the local one; there is
+// no digest-style parsing or an assumed algorithm (sha256sum's weakness: it
+// only says the hash is *a* 64-hex number, and must assume it is SHA-256). A
+// file that cannot be read reports FAILED open or read (or is silently skipped
+// under -i), and a non-zero exit is returned when any entry fails or is
+// unreadable (missing files under -i do not fail).
+func runHashCheck(args []string) error {
+	var (
+		mismatch   int
+		unreadable int
+	)
+
+	for _, listFile := range args {
+		entries, err := readChecksumList(listFile)
+		if err != nil {
+			return err
+		}
+
+		for _, e := range entries {
+			wantCID, name, ok := splitChecksumLine(e)
+			if !ok {
+				return fmt.Errorf("bad checksum-list line (expected <CID>  <file>): %s", strings.TrimSpace(e))
+			}
+			want, err := cid.Parse(wantCID)
+			if err != nil {
+				return fmt.Errorf("bad CID on checksum-list line %q: %v", strings.TrimSpace(e), err)
+			}
+
+			cLocal, err := cidForFile(name)
+			if err != nil {
+				unreadable++
+				if hashIgnore {
+					continue // -i: a file we cannot read is simply not present here
+				}
+				fmt.Printf("%s: FAILED open or read\n", name)
+				fmt.Fprintf(os.Stderr, "blob: %s: %v\n", name, err)
+				continue
+			}
+
+			if cLocal.Equals(want) {
+				fmt.Printf("%s: OK\n", name)
+			} else {
+				mismatch++
+				fmt.Printf("%s: FAILED\n", name)
+			}
+		}
+	}
+
+	if mismatch > 0 {
+		fmt.Fprintf(os.Stderr, "blob: WARNING: %d computed checksum%s did NOT match\n", mismatch, plural(mismatch))
+	}
+	if unreadable > 0 && !hashIgnore {
+		fmt.Fprintf(os.Stderr, "blob: WARNING: %d listed file%s could not be read\n", unreadable, plural(unreadable))
+	}
+
+	if mismatch > 0 || (unreadable > 0 && !hashIgnore) {
+		return fmt.Errorf("checksum verification failed")
+	}
+	return nil
+}
+
+// plural returns "s" when n != 1, "" otherwise (a tiny local helper rather than
+// importing a pluralizer for one word).
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+// readChecksumList returns the non-blank, non-comment lines of a checksum list.
+func readChecksumList(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var out []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		ln := sc.Text()
+		trimmed := strings.TrimLeft(ln, " \t")
+		if trimmed == "" || trimmed[0] == '#' {
+			continue
+		}
+		out = append(out, ln)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// splitChecksumLine splits a checksum-list line "<CID>  <file>" into its CID
+// and file name. The separator is the whitespace run between them; the CID is
+// a single token (no spaces) and the name is the rest of the line (it may
+// contain spaces and is not path-escaped, the same convention sha256sum uses).
+func splitChecksumLine(line string) (cidStr string, name string, ok bool) {
+	line = strings.TrimLeft(line, " \t")
+	i := 0
+	for i < len(line) && line[i] != ' ' && line[i] != '\t' {
+		i++
+	}
+	if i == 0 || i == len(line) {
+		return "", "", false
+	}
+	cidStr = line[:i]
+	name = strings.TrimLeft(line[i:], " \t")
+	if name == "" {
+		return "", "", false
+	}
+	return cidStr, name, true
 }
 
 // resolveDigest turns a get/cat argument into the blob's digest

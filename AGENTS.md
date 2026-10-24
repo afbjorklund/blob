@@ -45,9 +45,29 @@ go test ./...              # run the package tests (add -race for the concurrenc
   `basename(file) → multihash` in the name index
 - `blob add --only-hash/-n <file>` — like `ipfs add --only-hash`: print
   `added <cid> <file>` (one space), do not store
-- `blob hash <file>` — print `sha256sum`-style `<cid>  <file>` (two spaces)
-  without storing (equivalent to what `ipfs add --only-hash` gives after the
-  `added` prefix is stripped)
+- `blob hash <file>...` — print `sha256sum`-style `<cid>  <file>` (two spaces)
+  for **each** given file, one line per file, without storing (equivalent to
+  what `ipfs add --only-hash` gives after the `added` prefix is stripped).
+  Each file is opened, hashed and closed independently, so one unreadable file
+  does not stop the others — it prints its own `Error:` line to stderr and the
+  exit code is non-zero if *any* file failed (coreutils `sha256sum` does the
+  same)
+  - `blob hash -c <list>` — *verify* instead of compute: each line of `<list>`
+    (one or more checksum lists) is `<cid>  <file>`; `blob` recomputes the
+    local `<file>`'s CID and compares, printing `<file>: OK`, `<file>: FAILED`
+    (content differs) or `<file>: FAILED open or read` (the file is not there /
+    not readable). Exit non-zero if any entry fails or is unreadable. Never
+    touches the store — it hashes the named local file and compares the CIDs.
+    Blank and `#`-leading lines are skipped
+  - `blob hash -c -i <list>` — like `-c` but `-i`/`--ignore-missing` silently
+    skips entries whose file cannot be read (no `FAILED open or read`, no
+    WARNING, not counted as a failure) — the "one checksums list for all
+    arches, but I only downloaded one" case. A content mismatch still fails.
+  The list records the **full CID** (not a bare digest), so it is
+  self-describing — it carries the algorithm and the codec, and `-c` needs no
+  digest-style parsing and has no "improperly formatted" lines (sha256sum's
+  weakness: it only says the hash, not that it is `sha256`). In `main.go`
+  (`runHash` → `runHashCheck`, sharing `cidForFile` with `runAdd`)
 - `blob cid <cid|name>` — inspect a CID (any multibase) or an index name. Prints
   the CID **as given** on its own first line (a name argument is resolved to the
   CID, the one `lookup` would return) — then, after a blank line, a *breakdown*
