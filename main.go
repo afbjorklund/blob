@@ -15,10 +15,9 @@ import (
 	"blob/cid"
 	"blob/identity"
 	"blob/index"
+	"blob/progress"
 	"blob/storage"
 
-	"github.com/cheggaaa/pb/v3"
-	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
 
@@ -399,29 +398,6 @@ func digestFromCID(c cid.Cid) (storage.Digest, error) {
 	return storage.Digest(c.Hash()), nil
 }
 
-// progress wraps r in a pb progress bar for the transfer of `size` bytes, but
-// only when stdout is a TTY (pb renders to stdout; we never want to pollute a
-// piped / redirected stream) — otherwise r is passed through and bar is nil.
-// The bar tracks the actual transfer (the reads of r), the slow half of add /
-// get; the hash step is assumed fast and is never barred.
-//
-// It returns the reader to read for the transfer AND the bar itself: the
-// storage backends drive the read with io.Copy and never Close the reader
-// (they close their own destination), so pb's own Finish is never triggered —
-// the caller owns completing the bar (call bar.Finish() once the transfer is
-// done). Finish is idempotent and synchronous: it writes the final frame and
-// stops the refresh goroutine. A transfer fast enough to finish before pb's
-// first 200 ms tick paints only that single final line (or less), so a quick
-// op never flashes a bar.
-func progress(r io.Reader, size int64) (io.Reader, *pb.ProgressBar) {
-	fd := os.Stdout.Fd()
-	if !isatty.IsTerminal(fd) && !isatty.IsCygwinTerminal(fd) {
-		return r, nil
-	}
-	bar := pb.New64(size).Start()
-	return bar.NewProxyReader(r), bar
-}
-
 func runAdd(cmd *cobra.Command, args []string) error {
 	filePath := args[0]
 
@@ -469,11 +445,9 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
-		pr, bar := progress(file, stat.Size())
+		pr := progress.NewReader(file, stat.Size())
 		putErr := backend.Put(digest, stat.Size(), pr)
-		if bar != nil {
-			bar.Finish()
-		}
+		pr.Finish()
 		if putErr != nil {
 			return putErr
 		}
@@ -759,11 +733,9 @@ func runGet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	pr, bar := progress(reader, size)
+	pr := progress.NewReader(reader, size)
 	_, err = io.Copy(out, pr)
-	if bar != nil {
-		bar.Finish()
-	}
+	pr.Finish()
 	if err != nil {
 		_ = out.Close()
 		removeTmp(tmp)
