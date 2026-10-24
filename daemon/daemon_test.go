@@ -528,3 +528,135 @@ func TestNameSurface(t *testing.T) {
 		t.Errorf("GET unrecorded name = %d, want 404", resp.StatusCode)
 	}
 }
+
+// TestIPFSSurface exercises the /ipfs/<CID> compatibility surface: a held-codec
+// CID (raw or json) is a direct address and redirects 302 to /blob/<CID> (which
+// then serves the store's body); a foreign-codec CID (dag-pb — the default
+// `ipfs add` shape) is not a direct address, so it is tried as a name: recorded
+// (the "ipfs get → blob add" interop handle) it redirects 302 to the store's
+// /blob/<derived CID>, unrecorded it is 404. The point of the surface is that
+// an IPFS-style client can reach the store's content by the CID it already has,
+// without learning the store's blob:// scheme.
+func TestIPFSSurface(t *testing.T) { //nolint:gocyclo
+	be := newMemBackend()
+
+	// One small blob (the shared content). "compat payload" starts with a letter,
+	// so its content-coded CID is raw — the same CID the store would derive by
+	// peeking the first byte.
+	const payload = "compat payload"
+	key, err := identity.HashReader(strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := be.Put(storage.Digest(key), int64(len(payload)), strings.NewReader(payload)); err != nil {
+		t.Fatal(err)
+	}
+
+	render := func(code cid.Code) string {
+		s, err := cid.Render(cid.Build(code, key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	rawCID := render(cid.CodeRaw)
+	jsonCID := render(cid.CodeJson)
+	// A dag-pb CID over the same content — a foreign-codec CID, the shape the
+	// default `ipfs add` produces. It is a *name*, not a direct address.
+	dagPbCID := render(cid.CodeDagPb)
+	// Record it as a name (index.Check allows a foreign-codec CID as a name):
+	// the "ipfs get → blob add" interop handle a user creates with `--name`.
+	if err := be.Index(dagPbCID, storage.Digest(key)); err != nil {
+		t.Fatal(err)
+	}
+	// A dag-pb CID over *other*, unstored content, whose name was never recorded:
+	// the /ipfs/ fallback must 404 (not redirect) for it.
+	otherKey, err := identity.HashReader(strings.NewReader("other content that is not stored"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingDagPb, err := cid.Render(cid.Build(cid.CodeDagPb, otherKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := newTestServer(t, be)
+
+	// A client that does NOT follow redirects: we want to see the 302 and its
+	// Location, then assert the target serves the payload.
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+
+	doNoRedirect := func(path string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode, resp.Header.Get("Location")
+	}
+
+	t.Run("raw CID is a direct address: 302 to /blob/<CID>, serves the payload", func(t *testing.T) {
+		code, loc := doNoRedirect("/ipfs/" + rawCID)
+		if code != http.StatusFound {
+			t.Fatalf("GET /ipfs/<raw> = %d, want 302 (Location %q)", code, loc)
+		}
+		if loc != "/blob/"+rawCID {
+			t.Fatalf("Location = %q, want %q", loc, "/blob/"+rawCID)
+		}
+		status, body, _ := doHTTP(t, http.MethodGet, srv.URL+"/blob/"+rawCID)
+		if status != http.StatusOK || string(body) != payload {
+			t.Fatalf("/blob/<raw> = %d %q", status, body)
+		}
+	})
+
+	t.Run("json CID is a direct address: 302 to /blob/<CID>", func(t *testing.T) {
+		code, loc := doNoRedirect("/ipfs/" + jsonCID)
+		if code != http.StatusFound {
+			t.Fatalf("GET /ipfs/<json> = %d, want 302 (Location %q)", code, loc)
+		}
+		if loc != "/blob/"+jsonCID {
+			t.Fatalf("Location = %q, want %q", loc, "/blob/"+jsonCID)
+		}
+	})
+
+	t.Run("recorded dag-pb CID (a name) redirects 302 to the store's derived /blob/<CID>", func(t *testing.T) {
+		code, loc := doNoRedirect("/ipfs/" + dagPbCID)
+		if code != http.StatusFound {
+			t.Fatalf("GET /ipfs/<dag-pb recorded> = %d, want 302 (Location %q)", code, loc)
+		}
+		// NOT /blob/<dagPbCID> — that address does not hold (foreign codec). The
+		// store derives its own CID for the content (raw, first-byte rule), the
+		// same way /name/<name> does.
+		if loc != "/blob/"+rawCID {
+			t.Fatalf("Location = %q, want redirect to the derived /blob/%q", loc, rawCID)
+		}
+		status, body, _ := doHTTP(t, http.MethodGet, srv.URL+loc)
+		if status != http.StatusOK || string(body) != payload {
+			t.Fatalf("/blob/<derived> = %d %q", status, body)
+		}
+	})
+
+	t.Run("unrecorded dag-pb CID is 404, not redirected", func(t *testing.T) {
+		code, loc := doNoRedirect("/ipfs/" + missingDagPb)
+		if code != http.StatusNotFound {
+			t.Fatalf("GET /ipfs/<dag-pb unrecorded> = %d, want 404 (Location %q)", code, loc)
+		}
+		if loc != "" {
+			t.Fatalf("expected no Location on a 404, got %q", loc)
+		}
+	})
+
+	t.Run("invalid CID is a 400", func(t *testing.T) {
+		status, body, _ := doHTTP(t, http.MethodGet, srv.URL+"/ipfs/not-a-cid")
+		if status != http.StatusBadRequest {
+			t.Fatalf("GET /ipfs/not-a-cid = %d, want 400 (body %q)", status, body)
+		}
+	})
+}

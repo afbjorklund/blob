@@ -29,7 +29,8 @@ import (
 )
 
 // Server serves a single read-only store backend over HTTP: the CID gateway
-// (/blob/<CID>, /name/<name>) and the OCI distribution read surface (/v2/...).
+// (/blob/<CID>, /name/<name>, and the /ipfs/<CID> compatibility surface) and
+// the OCI distribution read surface (/v2/...).
 // One shared backend is held for the server's life and handed to every request
 // goroutine; the backends are safe for concurrent use (sql pools its
 // connections, dir opens a fresh handle per op, http/s3 serialise internally).
@@ -60,6 +61,15 @@ func (s *Server) Handler() http.Handler {
 	// and 302-redirects to the canonical /blob/<CID>.
 	mux.HandleFunc("/name/", func(w http.ResponseWriter, r *http.Request) {
 		s.serveName(w, r, r.URL.Path[len("/name/"):])
+	})
+	// /ipfs/<CID> : the IPFS-gateway compatibility surface — IPFS-style clients
+	// address content as /ipfs/<CID>; this parses the CID and applies the
+	// store's normal resolution order: a held-codec CID (raw/json) redirects
+	// 302 to /blob/<CID>; a foreign-codec CID (dag-pb, ...) is tried as a name
+	// in the index (the "ipfs get → blob add" interop handle) and, if recorded,
+	// redirects 302 to the store's derived /blob/<CID>, else 404.
+	mux.HandleFunc("/ipfs/", func(w http.ResponseWriter, r *http.Request) {
+		s.serveIPFS(w, r, r.URL.Path[len("/ipfs/"):])
 	})
 	// /v2/... : the OCI distribution read surface — a layout already in the store
 	// can be pulled by stock OCI clients (podman, oras, skopeo, buildkit) with no

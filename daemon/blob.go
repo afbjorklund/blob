@@ -122,6 +122,58 @@ func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request, ref string) {
 	_, _ = io.Copy(w, reader)
 }
 
+// serveIPFS is the IPFS-gateway compatibility surface: IPFS-style clients
+// address content as /ipfs/<CID>, so this root lets them reach the store's
+// /blob/<CID> surface without knowing this store's scheme. The CID (any
+// multibase) is parsed first, and the store's normal resolution order is
+// applied:
+//
+//   - held codec (raw / json): the CID's multihash is the store key directly,
+//     so 302 to /blob/<CID> (rendered base32hex) — a direct address.
+//   - foreign codec (e.g. dag-pb, the default `ipfs add` shape): the CID is
+//     not a direct address, so it is tried as a name in the index ("ipfs get →
+//     blob add" interop handle — index.Check explicitly allows this, and
+//     `resolveDigest`/`resolveStoreKey` resolve it the same way). On a name
+//     hit, 302 to /blob/<derived CID> (the store's CID for the content,
+//     derived by the peek-first-byte rule, the same way /name/<name> does).
+//     On a miss, 404.
+//
+// The redirect (not a direct serve) lets the client learn the canonical
+// address and keeps the content served from exactly one place (/blob/<CID>)
+// — same pattern as /name/<name>. The compatibility is bounded by shared
+// content, not by address: an IPFS raw-leaf piece is content the store holds
+// byte-for-byte, and a dag-pb root becomes addressable the moment a user
+// records it under its CID as a name (which `add`/`oci import` allow via
+// --name).
+func (s *Server) serveIPFS(w http.ResponseWriter, r *http.Request, ref string) {
+	c, err := cid.Parse(ref)
+	if err != nil {
+		http.Error(w, "invalid CID: "+ref, http.StatusBadRequest)
+		return
+	}
+	if cid.Supported(cid.Codec(c)) {
+		// Held codec: /blob/<CID> is a real address — apply the same gate
+		// /blob/<CID> would (codec + identity-aware hash), then redirect to it
+		// in the store's base (base32hex).
+		if _, err := digestFromCID(c); err != nil {
+			http.Error(w, "not held: "+cid.CodecName(cid.Codec(c)), http.StatusNotFound)
+			return
+		}
+		cidStr, err := cid.Render(c)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, "/blob/"+cidStr, http.StatusFound)
+		return
+	}
+	// Foreign codec: not a direct address. Try it as a name — the "ipfs get →
+	// blob add" interop handle index.Check allows — and, if recorded, the store
+	// derives its own CID for the content and redirects there, exactly as
+	// /name/<name> does.
+	s.serveName(w, r, ref)
+}
+
 // serveName resolves an index name to its blob, derives the blob's CID
 // by peeking the first byte (the same content-based codec rule as
 // `add`/`hash`), and issues a 302 redirect to /blob/<CID>. The redirect
