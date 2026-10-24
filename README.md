@@ -146,6 +146,10 @@ Options:
 - `--only-size` - Print only the blob size in bytes (do not retrieve the blob)
 - `--only-mtime` - Print only the blob's last-modified time in Unix seconds (do
   not retrieve the blob)
+- `--verify` - Re-hash the retrieved data against the blob's resolved multihash
+  and fail if the content does not match. The data is downloaded to a temporary
+  file and renamed into place only after the check passes, so a failed
+  verification leaves no partial or mismatched file at the output path
 
 ### List names
 

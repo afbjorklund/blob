@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -26,6 +28,7 @@ var (
 	outputPath  string
 	onlySize    bool
 	onlyMtime   bool
+	getVerify   bool
 	hashOnly    bool
 	hashCheck   bool
 	hashIgnore  bool
@@ -274,6 +277,7 @@ lines.`,
 	getCmd.Flags().StringVarP(&outputPath, "output", "o", "", "output file path")
 	getCmd.Flags().BoolVarP(&onlySize, "only-size", "", false, "print only the blob size in bytes, do not retrieve the blob")
 	getCmd.Flags().BoolVarP(&onlyMtime, "only-mtime", "", false, "print only the blob's last-modified time in Unix seconds, do not retrieve the blob")
+	getCmd.Flags().BoolVarP(&getVerify, "verify", "", false, "re-hash the downloaded data against the resolved multihash and fail the get on a mismatch (the file is not completed)")
 
 	rootCmd.AddCommand(getCmd)
 
@@ -715,18 +719,71 @@ func runGet(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	out, err := os.Create(outputPath)
+	// Download to a sibling <target>.tmp and rename it into place only
+	// once the data is in and (if --verify) checked — the same tmp+rename
+	// atomicity as the dir backend and the name index, so a failed or
+	// interrupted get never leaves a partial file at the target path.
+	tmp := outputPath + ".tmp"
+	out, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 
 	if _, err := io.Copy(out, reader); err != nil {
+		_ = out.Close()
+		removeTmp(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		removeTmp(tmp)
 		return err
 	}
 
-	fmt.Printf("Retrieved: %s -> %s\n", arg, outputPath)
+	if getVerify {
+		if err := checkRetrieved(tmp, digest); err != nil {
+			removeTmp(tmp)
+			return err
+		}
+	}
+
+	if err := os.Rename(tmp, outputPath); err != nil {
+		removeTmp(tmp)
+		return err
+	}
+
+	if getVerify {
+		fmt.Printf("Retrieved: %s -> %s (content verified against the resolved multihash)\n", arg, outputPath)
+	} else {
+		fmt.Printf("Retrieved: %s -> %s\n", arg, outputPath)
+	}
 	return nil
+}
+
+// checkRetrieved re-hashes a downloaded file and fails if its bytes do not
+// match the resolved multihash. The authority is the *resolved* digest — the
+// argument may have been a name or an OCI digest, only the digest is a
+// promise. It is the second read of the file (like add's hash-then-store);
+// SHA-2 256 is hardware-accelerated, so the re-check is cheap. The caller
+// removes the file on failure — the target path is never touched.
+func checkRetrieved(path string, want storage.Digest) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if !identity.Check(f, identity.Identity(want)) {
+		return fmt.Errorf("verification failed: %s does not match the resolved multihash", path)
+	}
+	return nil
+}
+
+// removeTmp best-effort deletes a leftover .tmp file, warning on stderr if it
+// cannot be removed (so a stuck file is noticed, not silently leaked).
+func removeTmp(path string) {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "blob: leftover %s: %v; keeping the file\n", path, err)
+	}
 }
 
 func runCat(cmd *cobra.Command, args []string) error {

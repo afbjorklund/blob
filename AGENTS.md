@@ -87,10 +87,22 @@ go test ./...              # run the package tests (add -race for the concurrenc
   inspector, narrowed to the spec's CIDv1 parts. In `main_cid.go`
 - `blob get <cid|name> -o <out>` — retrieve; argument is parsed as a CID first,
   falling back to the name index (so `get` round-trips a name passed to `add`);
-  `-o` defaults to using the argument as filename; `--only-size` and
-  `--only-mtime` print the blob's size (bytes) or mtime (Unix seconds) without
-  retrieving it — the mtime is the store's last-modified time for the blob (when
-  it was added), 0 if the backend does not track one
+   `-o` defaults to using the argument as filename; `--only-size` and
+   `--only-mtime` print the blob's size (bytes) or mtime (Unix seconds) without
+   retrieving it — the mtime is the store's last-modified time for the blob (when
+   it was added), 0 if the backend does not track one; `--verify` re-hashes the
+   retrieved data against the **resolved multihash** (the authority is the digest
+   `get` resolved to, never the filename, so a name that merely *looks* like a
+   CID is not a false oracle) and fails — removing the not-yet-renamed file — if
+   the bytes do not match; it is opt-in (a normal get trusts the stream, like
+   `add` trusting its own `Put`) and costs a second read, which is acceptable on
+   the same assumption as `add`: SHA-2 256 is hardware-accelerated. Regardless
+   of `--verify`, `get` downloads to a sibling `<target>.tmp` and `rename`s it
+   into place only once the data is fully written (and, with `--verify`,
+   checked), so a partial or failing get never leaves a truncated file at the
+   requested path — the same tmp+rename atomicity the dir backend and the name
+   index already use; a rename failure (or any failure) leaves the target
+   untouched and best-effort removes the `.tmp`
 - `blob list` — print the stored names, one per line. Lists the **index**, never
   the CAS: blobs with no name are invisible, blobs with several names list once
   per name. Backend-specific mechanics: dir reads the `index/` directory, sql
