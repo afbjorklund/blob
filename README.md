@@ -429,4 +429,4 @@ the `s3` backend) and the opt-in smoke tests, see [BACKEND.md](BACKEND.md).
 
 ## License
 
-MIT
+[MIT](LICENSE)
