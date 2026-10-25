@@ -180,8 +180,10 @@ BACKEND.md describes the *contract*. The Go-side mechanics:
 - **Dir fanout.** The hex key bytes are carved into 1-byte dir levels —
   `fanoutDepth = 3` — the rest as filename (`<b0>/<b1>/<b2>/<rest>`):
   encoding-agnostic, ≤256 per level, no knowledge of the hash algorithm.
-- **Windows.** The dir backend's name index is a symlink — Linux-only here;
-  a `git core.symlinks`-style text-target fallback is the intended migration.
+- **Platforms.** The dir backend's name index is a symlink — POSIX (any Unix);
+  Windows users can keep going through WSL, or use the `sql` backend, whose
+  index is a plain table. A non-symlink target fallback is the intended
+  native-Windows migration.
 
 ## Development
 
