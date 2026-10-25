@@ -42,9 +42,11 @@ type S3Storage struct {
 // NewS3Storage builds a client to endpoint (host:port, or a full
 // http(s):// URL whose scheme picks TLS), scoped to bucket. Access key /
 // secret ride on auth (a zero Auth = anonymous). region is the S3 region used
-// for SigV4 signing: the CLI defaults it (e.g. us-east-1, which Ceph RGW
-// accepts); if it is left empty the client defers to the server's bucket
-// location.
+// for SigV4 signing: the CLI leaves it empty by default (there is no
+// CLI-side region default), in which case the client defers to the server's
+// bucket location (Ceph RGW, MinIO, and AWS all accept that). Set it for
+// region-aware deployments such as AWS, where the region takes part of the
+// SigV4 signature.
 func NewS3Storage(endpoint, bucket, region string, auth Auth, mode Mode) (*S3Storage, error) {
 	if bucket == "" {
 		return nil, errors.New("s3 backend requires a bucket name")
