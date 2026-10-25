@@ -202,3 +202,36 @@ mapping is a deliberately separate, planned wrapper.
   `org.opencontainers.image.title` layer-skip in oras is the same
   class of issue — a client heuristic treating an optional annotation
   as mandatory, not an OCI requirement.)
+- No **`rm`**, yet. A name-only `rm <name>` (drop the index link,
+  blob stays) is the safe, cheap half — one bounded index entry,
+  no consistency invariant to check, no CAS walk — and is the
+  natural first step once asked for. A blob-level `rm <cid>` is a
+  different shape: it is a *removal-of-reference* operation, not a
+  filesystem `rm`, and the design constraint is "never leave a
+  dangling name or a shared layer orphaned." Concretely, a `rm <cid>`
+  would need: (1) to also drop every name that maps to the CID
+  (dangling-index guard, bounded on every backend — `SELECT
+  WHERE hash = ?`, `ReadDir` with a filter, prefix listing), and
+  (2) an *orphan check* of the inverse Reachability walk — for
+  every name `n`, "is this CID a member of the graph reachable
+  from `n`?" — to refuse the deletion if the blob is referenced
+  by another name's layout. The walk already exists
+  (`oci.Reachable`, forward from a root); the *reverse* (who
+  references this) requires enumerating all names and walking
+  forward from each, which on http is an unbounded N wire cost.
+  That's the same cost that motivates deferring `du` (below).
+  The honest escape hatch today is the operator's: the store's
+  physical layout (dir files, sql rows, S3 keys) is the admin
+  surface, and `blob cid` gives you the multihash to find it.
+- No **`du` / list-blobs**, yet. The cost and even implementability
+  are backend-dependent: cheap on sql (`SELECT hash, length(data)
+  FROM blobs`), bounded on s3 (`ListObjects` already carries
+  `ContentLength`), more work on dir (`stat` per fanout leaf), and
+  unbounded on http (N wire round-trips to `HEAD` each entry).
+  The design consequence is a clean split: `list` enumerates the
+  *bounded* index (one round-trip on every backend, names only,
+  never touches the CAS), and per-blob sizes are resolvable one at
+  a time on demand via `get --only-size` / `--only-mtime`. A
+  whole-CAS enumeration is a deliberately separate command once
+  asked for (a `du` or `gc`), because it would inherit the same
+  backend-dependent cost profile as a blob-level `rm`.
