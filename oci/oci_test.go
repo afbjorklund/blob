@@ -196,7 +196,7 @@ func readAll(src *DirLayout, d Digest) ([]byte, error) {
 func TestNewArtifact(t *testing.T) {
 	layer := []byte("artifact-payload")
 	ld := DigestOf(layer)
-	a, err := NewArtifact(ld, int64(len(layer)), "", "", "")
+	a, err := NewArtifact(ld, int64(len(layer)), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

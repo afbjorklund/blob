@@ -138,11 +138,13 @@ type Descriptor struct {
 
 // Manifest is one image or artifact manifest. An image references a config and
 // zero or more layers. An artifact (the single-file import case) references the
-// empty config and a single layer, and additionally sets ArtifactType.
+// empty config and a single layer. The spec's artifactType field is not set:
+// tooling falls back to config.mediaType (per the image-spec implementers'
+// note), which we always populate. (Should we ever adopt the "empty config"
+// media type, whose fallback would be meaningless, set artifactType again.)
 type Manifest struct {
 	SchemaVersion int               `json:"schemaVersion"`
 	MediaType     string            `json:"mediaType,omitempty"`
-	ArtifactType  string            `json:"artifactType,omitempty"`
 	Config        Descriptor        `json:"config"`
 	Layers        []Descriptor      `json:"layers,omitempty"`
 	Annotations   map[string]string `json:"annotations,omitempty"`

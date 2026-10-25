@@ -227,7 +227,7 @@ func openLayoutSource(arg string) (layoutSource, func(), oci.Digest, error) {
 		return nil, nil, "", err
 	}
 	cfgMT, layerMT := oci.MediaTypesFor(head)
-	a, err := oci.NewArtifact(layerDigest, size, layerMT, layerMT, cfgMT)
+	a, err := oci.NewArtifact(layerDigest, size, layerMT, cfgMT)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -593,9 +593,8 @@ func runOCILs(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  manifest %s: <invalid: %v>\n", m.Digest, err)
 			continue
 		}
-		atype := mf.ArtifactType
-		fmt.Printf("  manifest %s (%s, %d B%s)\n",
-			m.Digest, mf.MediaType, m.Size, artifactSuffix(atype))
+		fmt.Printf("  manifest %s (%s, %d B)\n",
+			m.Digest, mf.MediaType, m.Size)
 		if mf.Config.Digest != "" {
 			fmt.Printf("    config  %s (%s, %d B)\n",
 				mf.Config.Digest, mf.Config.MediaType, mf.Config.Size)
@@ -605,11 +604,4 @@ func runOCILs(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return nil
-}
-
-func artifactSuffix(at string) string {
-	if at == "" {
-		return ""
-	}
-	return " artifactType=" + at
 }

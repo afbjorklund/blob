@@ -103,7 +103,7 @@ func newImageLayout(t *testing.T, be storage.StorageBackend, name string) puller
 }
 
 // newArtifactLayout wraps a bare payload as a single-layer OCI artifact
-// (index → manifest[artifactType] → `{}` config + layer) and stores it. Under
+// (index → manifest → `{}` config + layer) and stores it. Under
 // the CLI's naming policy (`oci import <file>`) a bare file's name points at
 // the *file's bytes* (consistent with `blob add`), not at this scaffold — so
 // the name here records against the payload, not `a.IndexDigest`, and the
@@ -115,7 +115,7 @@ func newArtifactLayout(t *testing.T, be storage.StorageBackend, name string) pul
 	payload := []byte("smoke artifact layer payload")
 	layerD := oci.DigestOf(payload)
 	a, err := oci.NewArtifact(layerD, int64(len(payload)),
-		oci.MediaTypeGenericBinary, "application/vnd.blob.artifact.v1", oci.MediaTypeUnknownConfig)
+		oci.MediaTypeGenericBinary, oci.MediaTypeUnknownConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
