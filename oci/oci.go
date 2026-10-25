@@ -62,16 +62,44 @@ const (
 // A var (not a const) because a []byte literal is not a constant.
 var SifMagic = []byte("SIF_MAGIC\x00")
 
+// SifLauncher is the 32-byte launcher stub Apptainer/Singularity prepend to a
+// SIF so the file is directly executable: `#!/usr/bin/env run-singularity`
+// plus a trailing newline and NUL. A SIF may begin with SifMagic (offset 0) or
+// with SifLauncher followed by SifMagic (offset len(SifLauncher)).
+var SifLauncher = []byte("#!/usr/bin/env run-singularity\n\x00")
+
+// SifSniffLen is the number of leading bytes a caller must read to disambiguate
+// a SIF (SifMagic at the front, or SifLauncher + SifMagic) from everything
+// else.
+var SifSniffLen = len(SifLauncher) + len(SifMagic)
+
 // MediaTypesFor returns the (config, layer) media types for a bare file wrapped
-// as a single-layer artifact, from its leading bytes: the SIF magic → the SIF
-// types, anything else → unknown config + generic binary. This mirrors the
-// store's own two-branch content rule (json vs raw); SIF is the one recognized
-// special case, the rest is generic. A head shorter than the magic is non-SIF.
+// as a single-layer artifact, from its leading bytes: the SIF magic (optionally
+// behind the launcher stub) → the SIF types, anything else → unknown config +
+// generic binary. This mirrors the store's own two-branch content rule (json vs
+// raw); SIF is the one recognized special case, the rest is generic. A head
+// shorter than the needed sniff is non-SIF.
 func MediaTypesFor(head []byte) (config, layer string) {
-	if len(head) >= len(SifMagic) && bytes.Equal(head[:len(SifMagic)], SifMagic) {
+	if isSifHead(head) {
 		return MediaTypeSifConfig, MediaTypeSifLayer
 	}
 	return MediaTypeUnknownConfig, MediaTypeGenericBinary
+}
+
+// isSifHead reports whether the leading bytes are a SIF: SifMagic at offset 0,
+// or the launcher stub followed by SifMagic (executable images Apptainer and
+// Singularity build). Anything else — including a short head — is not SIF.
+func isSifHead(head []byte) bool {
+	if len(head) >= len(SifMagic) && bytes.Equal(head[:len(SifMagic)], SifMagic) {
+		return true
+	}
+	end := len(SifLauncher) + len(SifMagic)
+	if len(head) >= end &&
+		bytes.Equal(head[:len(SifLauncher)], SifLauncher) &&
+		bytes.Equal(head[len(SifLauncher):end], SifMagic) {
+		return true
+	}
+	return false
 }
 
 // Source is a read side: it supplies blob contents by OCI digest. Import

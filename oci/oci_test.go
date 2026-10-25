@@ -234,6 +234,22 @@ func TestMediaTypesFor(t *testing.T) {
 	if cfg != MediaTypeSifConfig || layer != MediaTypeSifLayer {
 		t.Errorf("MediaTypesFor(SIF+rest) = (%q,%q), want SIF types", cfg, layer)
 	}
+	// Launcher-prepended SIF (executable Apptainer/Singularity images): the
+	// stub + magic -> the SIF types.
+	cfg, layer = MediaTypesFor(append(append([]byte{}, SifLauncher...), SifMagic...))
+	if cfg != MediaTypeSifConfig || layer != MediaTypeSifLayer {
+		t.Errorf("MediaTypesFor(launcher+SIF) = (%q,%q), want SIF types", cfg, layer)
+	}
+	// Launcher + magic + more bytes (a real file head).
+	cfg, layer = MediaTypesFor(append(append(append([]byte{}, SifLauncher...), SifMagic...), []byte("rest")...))
+	if cfg != MediaTypeSifConfig || layer != MediaTypeSifLayer {
+		t.Errorf("MediaTypesFor(launcher+SIF+rest) = (%q,%q), want SIF types", cfg, layer)
+	}
+	// Launcher stub but not the magic after it -> generic.
+	cfg, layer = MediaTypesFor(append(append([]byte{}, SifLauncher...), []byte("XIF_MAGIC\x00")...))
+	if cfg != MediaTypeUnknownConfig || layer != MediaTypeGenericBinary {
+		t.Errorf("MediaTypesFor(launcher+non-SIF) = (%q,%q), want generic", cfg, layer)
+	}
 	// Non-SIF generic content -> unknown config + generic binary.
 	cfg, layer = MediaTypesFor([]byte("SIF_MAGICX")) // last byte wrong
 	if cfg != MediaTypeUnknownConfig || layer != MediaTypeGenericBinary {

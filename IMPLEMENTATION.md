@@ -110,9 +110,11 @@ never names a multihash, a CID, or a storage backend):
 - `NewArtifact(...)` — wrap a bare file as a single-layer OCI artifact: the
   canonical `{}` config, one layer, `artifactType` from the layer's media
   type. Media types are **sniffed, not invented**: one recognized special
-  case — SIF (`SIF_MAGIC\x00` → `vnd.sylabs.sif.config.v1+json` config +
-  `vnd.sylabs.sif.layer.v1.sif` layer); everything else generic
-  (`vnd.unknown.config.v1+json` config + `application/octet-stream` layer).
+   case — SIF (`SIF_MAGIC\x00`, optionally behind the 32-byte
+   `#!/usr/bin/env run-singularity\n\x00` launcher stub that Apptainer and
+   Singularity prepend to executable images → `vnd.sylabs.sif.config.v1+json`
+   config + `vnd.sylabs.sif.layer.v1.sif` layer); everything else generic
+   (`vnd.unknown.config.v1+json` config + `application/octet-stream` layer).
 - `NewDir` (`DirLayout`) / `NewTarSink` / `NewTarFileSource` — the
   layout adapters (`oci.Source`/`oci.Sink`).
 - `ListMembers` / `ReadMember` — layer membership (tar listing / one member

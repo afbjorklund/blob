@@ -220,9 +220,9 @@ func openLayoutSource(arg string) (layoutSource, func(), oci.Digest, error) {
 	if layerDigest == "" {
 		return nil, nil, "", fmt.Errorf("oci: could not compute digest of %s", arg)
 	}
-	// Sniff the first len(oci.SifMagic) bytes to pick the media types
-	// (SIF or generic). Bounded by 10 bytes; the file is not buffered.
-	head, err := readFirstBytes(arg, len(oci.SifMagic))
+	// Sniff the first SifSniffLen bytes to pick the media types (SIF or
+	// generic). Bounded; the file is not buffered.
+	head, err := readFirstBytes(arg, oci.SifSniffLen)
 	if err != nil {
 		return nil, nil, "", err
 	}
