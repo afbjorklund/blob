@@ -162,6 +162,8 @@ blob get ubuntu_latest.sif -o output.sif
 Options:
 
 - `-o <output-file>` - Output file path (defaults to the argument as filename)
+- `--force` / `-f` - Overwrite the output file if it already exists. Without
+  it, a `get` whose target path exists fails before downloading anything
 - `--only-size` - Print only the blob size in bytes (do not retrieve the blob)
 - `--only-mtime` - Print only the blob's last-modified time in Unix seconds (do
   not retrieve the blob)

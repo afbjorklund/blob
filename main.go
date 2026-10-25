@@ -30,6 +30,7 @@ var (
 	onlySize    bool
 	onlyMtime   bool
 	getVerify   bool
+	getForce    bool
 	hashOnly    bool
 	hashCheck   bool
 	hashIgnore  bool
@@ -279,6 +280,7 @@ lines.`,
 	getCmd.Flags().BoolVarP(&onlySize, "only-size", "", false, "print only the blob size in bytes, do not retrieve the blob")
 	getCmd.Flags().BoolVarP(&onlyMtime, "only-mtime", "", false, "print only the blob's last-modified time in Unix seconds, do not retrieve the blob")
 	getCmd.Flags().BoolVarP(&getVerify, "verify", "", false, "re-hash the downloaded data against the resolved multihash and fail the get on a mismatch (the file is not completed)")
+	getCmd.Flags().BoolVarP(&getForce, "force", "f", false, "overwrite the output file if it already exists (otherwise the get fails)")
 
 	rootCmd.AddCommand(getCmd)
 
@@ -721,6 +723,12 @@ func runGet(cmd *cobra.Command, args []string) error {
 	if onlyMtime {
 		fmt.Println(mtime)
 		return nil
+	}
+
+	// Never clobber an existing output unless --force: the check runs
+	// before the download starts, so a refused get costs nothing.
+	if _, err := os.Stat(outputPath); err == nil && !getForce {
+		return fmt.Errorf("%s already exists (use -f/--force to overwrite)", outputPath)
 	}
 
 	// Download to a sibling <target>.tmp and rename it into place only
