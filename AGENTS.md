@@ -26,6 +26,7 @@ tests by convention (it is the CLI / adapters).
 go build -o blob
 golangci-lint run          # govet + gocyclo; gofmt/goimports formatters
 go test ./...              # run the package tests (add -race for the concurrency guard)
+markdownlint-cli2 *.md     # lint the docs (see .markdownlint.json for overrides)
 ```
 
 - Inspect a dependency's API with `go doc <pkg> [symbol]` (e.g.
@@ -425,4 +426,4 @@ go test ./...              # run the package tests (add -race for the concurrenc
 - Go 1.26; `blob` binary and `.blob-store/` are gitignored
 - Verify changes in order, cheapest first: gofmt/goimports the edited files →
   `go build ./...` → `go test ./...` (for package changes) → `golangci-lint run`
-  (heaviest; the final gate, if available)
+  (heaviest; the final gate, if available) → `markdownlint-cli2 *.md` (doc changes)
