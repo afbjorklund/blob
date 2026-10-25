@@ -1,7 +1,7 @@
 # Design notes
 
 Rationale for the choices in this store. Usage: README.md.
-Implementation details: AGENTS.md.
+Implementation details: IMPLEMENTATION.md.
 
 ## Content-based codec, not extension-based
 

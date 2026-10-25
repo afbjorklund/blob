@@ -7,6 +7,19 @@ produce).
 
 See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
 
+## Build
+
+`blob` is a local Go module (no import path to install from a registry), so
+build it from the checkout, in the module directory:
+
+```bash
+go build      # builds the `blob` binary into the current directory
+go install    # installs it into GOBIN / ~/go/bin (on PATH, so just `blob`)
+blob --help
+```
+
+The toolchain and the lint/test gates live in [AGENTS.md](AGENTS.md).
+
 ## Features
 
 - **Content addressing with dedup** - files are stored by their content hash
@@ -119,6 +132,8 @@ blob add <file>
 Options:
 
 - `--storage dir|sql|http|s3` - Storage backend (default: `dir`)
+- `--only-hash` / `-n` - print `added <cid> <file>` like `blob hash`, but do
+  **not** store (and record no index name)
 - `--path <dir|dbfile|url>` - Storage location (a local dir/dbfile for `dir`/`sql`;
   a base URL for `http`; an endpoint URL for `s3`)
 - `--bucket <name>` (or `BLOB_BUCKET`) - S3 bucket (only for `s3`)
@@ -126,6 +141,12 @@ Options:
   blank defers to the server, set for AWS-like regions)
 - `--user` / `--pass` (or `BLOB_USER`/`BLOB_PASS`) - remote-backend credentials
   (Basic auth user/password for `http`; access key / secret key for `s3`)
+
+All of these are global flags (any subcommand accepts them), and each can be
+pre-set via an environment variable the flag falls back to: `BLOB_STORAGE_TYPE`
+(`--storage`), `BLOB_STORAGE_PATH` (`--path`), `BLOB_BUCKET` (`--bucket`),
+`BLOB_S3_REGION` (`--region`), and `BLOB_USER`/`BLOB_PASS`. An explicit flag
+always wins over the environment.
 
 ### Get from blob store
 
@@ -150,6 +171,19 @@ Options:
   and fail if the content does not match. The data is downloaded to a temporary
   file and renamed into place only after the check passes, so a failed
   verification leaves no partial or mismatched file at the output path
+
+### Print a blob to stdout
+
+```bash
+blob cat <cid|name>
+```
+
+Resolves by CID (or the name index, exactly like `get`) and writes the blob's
+bytes to stdout — nothing else. A `get` to stdout, for piping:
+
+```bash
+blob cat ubuntu_latest.sif | tar -x
+```
 
 ### List names
 
@@ -182,6 +216,36 @@ on disk / in the index), but handy:
 blob lookup ubuntu_latest.sif
 v05ah4859p5vrofmfpdv5i8om998c9k4gd0ge2shctr5jofc6ufj3ghgf8k
 ```
+
+### Inspect a CID
+
+```bash
+blob cid <cid|name>
+```
+
+Decodes a CID (any multibase) or resolves an index name to that CID — and prints
+a breakdown of its CIDv1 parts: multibase, version, codec (name + hex code),
+multihash (name + hex code, size in bits/bytes), and the raw digest in lower-case
+base16. A pure decode: a CID argument never opens a backend, a name argument
+resolves it read-only and derives the codec the same way `lookup` does.
+
+```console
+$ blob cid v060084h005dbqvqsolt2rmabem8f0imo1117742uscvcbjlulph2eqknv1h0
+v060084h005dbqvqsolt2rmabem8f0imo1117742uscvcbjlulph2eqknv1h0
+
+multibase:  base32hex (v)
+version  :  cidv1 (0x01)
+codec    :  json (0x200)
+multihash:  sha2-256 (0x12), 256 bits (32 bytes = 0x20)
+digest   :  015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862
+
+store:      yes — json, usable with add / get / cat
+```
+
+A CID of a codec this store does not hold (say a `dag-pb` CID from `ipfs add`)
+still decodes fine — the last line notes `store: no …`, but it is the same
+multihash the store would address. `--base <name>` re-renders the first line in
+another multibase (`base16`, `base64url`, `base58btc`, …) as a learning aid.
 
 ### OCI import / export
 
@@ -300,6 +364,10 @@ GET /v2/name/<name>/blobs/sha256:...                # secondary: an inner compon
   store has no name:tag split.
 - Read-only (no push), no auth, no HTTPS — the server assumes a **plain-HTTP**
   base on localhost, the way a trusted local registry is configured.
+- The manifest response carries the store's CID in a non-standard
+  `X-Blob-Cid` header (base32hex) — the OCI spec's `Docker-Content-Digest` is
+  `sha256:<hex>` and carries no codec, so it cannot pin the CID. Clients that
+  don't know about it ignore it.
 
 ```bash
 # terminal 1: import + serve
