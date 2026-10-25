@@ -18,8 +18,6 @@ go install    # installs it into GOBIN / ~/go/bin (on PATH, so just `blob`)
 blob --help
 ```
 
-The toolchain and the lint/test gates live in [AGENTS.md](AGENTS.md).
-
 ## Features
 
 - **Content addressing with dedup** - files are stored by their content hash

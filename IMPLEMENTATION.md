@@ -183,6 +183,17 @@ BACKEND.md describes the *contract*. The Go-side mechanics:
 - **Windows.** The dir backend's name index is a symlink — Linux-only here;
   a `git core.symlinks`-style text-target fallback is the intended migration.
 
+## Development
+
+The gates, cheapest first:
+
+1. `gofmt -w` (or `goimports -w`) the edited `.go` files
+2. `go build ./...`
+3. `go test ./...` (add `-race` for the storage concurrency guard)
+4. `golangci-lint run` (govet + gocyclo; gofmt/goimports formatters; the
+   final gate)
+5. `markdownlint-cli2 *.md` (doc changes)
+
 ## Testing
 
 - `identity/`, `cid/`, `index/`, `oci/`, `daemon/` — table-driven tests
