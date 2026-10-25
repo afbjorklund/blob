@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"blob/cid"
@@ -34,6 +35,7 @@ var (
 	hashOnly    bool
 	hashCheck   bool
 	hashIgnore  bool
+	listLong    bool
 	listenAddr  string
 	httpUser    string
 	httpPass    string
@@ -308,6 +310,8 @@ lines.`,
 		Args:  cobra.NoArgs,
 		RunE:  runList,
 	}
+
+	listCmd.Flags().BoolVarP(&listLong, "long", "l", false, "also print each name's CID and blob size (one backend lookup per name)")
 
 	rootCmd.AddCommand(listCmd)
 
@@ -871,8 +875,50 @@ func runList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if !listLong {
+		for _, name := range names {
+			fmt.Println(name)
+		}
+		return nil
+	}
+
+	// -l/--long: one tab-separated line per name: name, CID, blob size.
+	// A blob shared by several names is looked up once (keyed by digest),
+	// not per name. When the blob is unreachable (a dangling index entry)
+	// the CID and size print as "-".
+	type info struct {
+		cid  string
+		size int64
+	}
+	cached := make(map[string]info)
 	for _, name := range names {
-		fmt.Println(name)
+		key, err := backend.Lookup(name)
+		if err != nil {
+			fmt.Printf("%s\t-\t-\n", name)
+			continue
+		}
+		k := string(key)
+		info, ok := cached[k]
+		if !ok {
+			info.cid = "-"
+			if c, cerr := cidForDigest(backend, key); cerr == nil {
+				if r, rerr := cid.Render(c); rerr == nil {
+					info.cid = r
+				}
+			}
+			if reader, sz, _, gerr := backend.Get(key); gerr == nil {
+				info.size = sz
+				_ = reader.Close()
+			} else {
+				info.size = -1
+			}
+			cached[k] = info
+		}
+		sizeStr := "-"
+		if info.size >= 0 {
+			sizeStr = strconv.FormatInt(info.size, 10)
+		}
+		fmt.Printf("%s\t%s\t%s\n", name, info.cid, sizeStr)
 	}
 	return nil
 }

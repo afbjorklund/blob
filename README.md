@@ -201,6 +201,17 @@ ubuntu_26.04.sif
 ubuntu_latest.sif
 ```
 
+`--long` / `-l` prints one tab-separated line per name with the name's CID and
+the blob's size in bytes (`name<TAB>cid<TAB>size`) — the same values `lookup`
+and `get --only-size` report, for every name in one place. A blob shared by
+several names is resolved once, not per name.
+
+```console
+$ blob list -l
+ubuntu_26.04.sif    v05ah...j8dg    52428800
+ubuntu_latest.sif   v05ah...j8dg    52428800
+```
+
 ### Look up a name's CID (convenience)
 
 ```bash
