@@ -30,4 +30,5 @@ particular should not skip:
   editing any `.go` file, re-format: `gofmt -w <file>` (or `goimports -w` for
   import grouping).
 
-The `blob` binary and `.blob-store/` are gitignored — do not commit them.
+The `blob` binary, `.blob-store/`, and `*.sif`/`*.tar`/`*.tgz` are
+gitignored.
