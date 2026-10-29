@@ -530,12 +530,14 @@ func TestNameSurface(t *testing.T) {
 }
 
 // TestIPFSSurface exercises the /ipfs/<CID> compatibility surface: a held-codec
-// CID (raw or json) is a direct address and redirects 302 to /blob/<CID> (which
-// then serves the store's body); a foreign-codec CID (dag-pb — the default
+// CID (raw or json) is a direct address and redirects 301 to /blob/<CID> (a
+// permanent identity mapping — same bytes, same address — so it may be cached)
+// which then serves the store's body; a foreign-codec CID (dag-pb — the default
 // `ipfs add` shape) is not a direct address, so it is tried as a name: recorded
 // (the "ipfs get → blob add" interop handle) it redirects 302 to the store's
-// /blob/<derived CID>, unrecorded it is 404. The point of the surface is that
-// an IPFS-style client can reach the store's content by the CID it already has,
+// /blob/<derived CID> (the name mapping is mutable — last add wins — so it must
+// not be cached), unrecorded it is 404. The point of the surface is that an
+// IPFS-style client can reach the store's content by the CID it already has,
 // without learning the store's blob:// scheme.
 func TestIPFSSurface(t *testing.T) { //nolint:gocyclo
 	be := newMemBackend()
@@ -602,10 +604,10 @@ func TestIPFSSurface(t *testing.T) { //nolint:gocyclo
 		return resp.StatusCode, resp.Header.Get("Location")
 	}
 
-	t.Run("raw CID is a direct address: 302 to /blob/<CID>, serves the payload", func(t *testing.T) {
+	t.Run("raw CID is a direct address: 301 to /blob/<CID>, serves the payload", func(t *testing.T) {
 		code, loc := doNoRedirect("/ipfs/" + rawCID)
-		if code != http.StatusFound {
-			t.Fatalf("GET /ipfs/<raw> = %d, want 302 (Location %q)", code, loc)
+		if code != http.StatusMovedPermanently {
+			t.Fatalf("GET /ipfs/<raw> = %d, want 301 (Location %q)", code, loc)
 		}
 		if loc != "/blob/"+rawCID {
 			t.Fatalf("Location = %q, want %q", loc, "/blob/"+rawCID)
@@ -616,10 +618,10 @@ func TestIPFSSurface(t *testing.T) { //nolint:gocyclo
 		}
 	})
 
-	t.Run("json CID is a direct address: 302 to /blob/<CID>", func(t *testing.T) {
+	t.Run("json CID is a direct address: 301 to /blob/<CID>", func(t *testing.T) {
 		code, loc := doNoRedirect("/ipfs/" + jsonCID)
-		if code != http.StatusFound {
-			t.Fatalf("GET /ipfs/<json> = %d, want 302 (Location %q)", code, loc)
+		if code != http.StatusMovedPermanently {
+			t.Fatalf("GET /ipfs/<json> = %d, want 301 (Location %q)", code, loc)
 		}
 		if loc != "/blob/"+jsonCID {
 			t.Fatalf("Location = %q, want %q", loc, "/blob/"+jsonCID)

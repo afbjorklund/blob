@@ -129,14 +129,19 @@ func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request, ref string) {
 // applied:
 //
 //   - held codec (raw / json): the CID's multihash is the store key directly,
-//     so 302 to /blob/<CID> (rendered base32hex) — a direct address.
+//     so 301 to /blob/<CID> (rendered base32hex) — a direct address. 301
+//     (Moved Permanently) rather than 302: a blob's CID is permanent by
+//     construction (same bytes → same identity), so the redirect is safe to
+//     cache, and it signals to the client "this is the canonical address,
+//     use it going forward."
 //   - foreign codec (e.g. dag-pb, the default `ipfs add` shape): the CID is
 //     not a direct address, so it is tried as a name in the index ("ipfs get →
 //     blob add" interop handle — index.Check explicitly allows this, and
 //     `resolveDigest`/`resolveStoreKey` resolve it the same way). On a name
 //     hit, 302 to /blob/<derived CID> (the store's CID for the content,
 //     derived by the peek-first-byte rule, the same way /name/<name> does).
-//     On a miss, 404.
+//     302 (Found) rather than 301: the name→CID mapping is mutable (last
+//     add wins), so the redirect must not be cached. On a miss, 404.
 //
 // The redirect (not a direct serve) lets the client learn the canonical
 // address and keeps the content served from exactly one place (/blob/<CID>)
@@ -164,7 +169,10 @@ func (s *Server) serveIPFS(w http.ResponseWriter, r *http.Request, ref string) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		http.Redirect(w, r, "/blob/"+cidStr, http.StatusFound)
+		// 301, not 302: a held codec's CID is the content's permanent identity
+		// (same bytes → same address), so the redirect may be cached, and it
+		// tells the client this is the canonical address to keep using.
+		http.Redirect(w, r, "/blob/"+cidStr, http.StatusMovedPermanently)
 		return
 	}
 	// Foreign codec: not a direct address. Try it as a name — the "ipfs get →
