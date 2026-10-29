@@ -202,6 +202,9 @@ mapping is a deliberately separate, planned wrapper.
   `org.opencontainers.image.title` layer-skip in oras is the same
   class of issue — a client heuristic treating an optional annotation
   as mandatory, not an OCI requirement.)
+
+## Possible additions: what we haven't done **yet**
+
 - No **`rm`**, yet. A name-only `rm <name>` (drop the index link,
   blob stays) is the safe, cheap half — one bounded index entry,
   no consistency invariant to check, no CAS walk — and is the
