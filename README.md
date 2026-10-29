@@ -28,8 +28,9 @@ blob --help
   everything else as `Raw` (see [DESIGN.md](DESIGN.md) for the rationale)
 - **OCI import / export** - `oci import` reads a modern OCI layout (a directory,
   or a `docker save`/`podman save` tar — the v25+ "hybrid" is read by its OCI
-  half) or wraps a bare file as a single-layer OCI **artifact**, storing every
-  reachable blob; `oci export` writes the layout back out (dir or tar)
+  half — or its gzip-compressed form, a `.tgz`/`.tar.gz`) or wraps a bare file
+  as a single-layer OCI **artifact**, storing every reachable blob; `oci export`
+  writes the layout back out (dir or tar)
   byte-for-byte. Digests in OCI (`sha256:<hex>`) are the same bytes as the
   store's sha2-256 multihash, so an OCI import and a plain `add` of identical
   content deduplicate for free. `oci add`/`oci get` work as aliases. No registry
@@ -263,13 +264,15 @@ another multibase (`base16`, `base64url`, `base58btc`, …) as a learning aid.
 Import and export OCI layouts (images and artifacts). Input is the local OCI
 layout that `docker save`/`podman save` produce — a directory, or a tar
 (including the v25+ "hybrid" that is both a docker archive and an OCI archive;
-the OCI half is read, the docker half ignored). A bare file is wrapped as a
-single-layer OCI artifact.
+the OCI half is read, the docker half ignored), or its gzip-compressed form
+(a `.tgz`/`.tar.gz`), which is decompressed transparently. A bare file is
+wrapped as a single-layer OCI artifact.
 
 ```bash
 # Import an OCI layout (dir or tar) — stores the reachable blobs, names it:
 blob oci import oci-save/busybox       # a directory layout
 blob oci import busybox.tar            # a docker/podman save tar (hybrid OK)
+blob oci import busybox.tgz            # gzip-compressed layout (decompressed)
 
 # Import a bare file as a single-layer OCI artifact (config = {}, one layer):
 # the name (basename + any --name) points at the file's bytes (same key as

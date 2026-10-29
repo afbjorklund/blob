@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"os"
@@ -173,14 +174,23 @@ func resolveStoreKey(arg string) (identity.Identity, error) {
 }
 
 // openLayoutSource opens arg as an OCI source: a directory layout, a tar
-// archive layout, or (falling back) a bare file wrapped as a single-layer
-// artifact. It returns the source, a closer the caller must invoke (nil
-// otherwise), and the name target: the digest whose store key the name index
-// should record names against ("" for a genuine layout, which names its
-// index; for a wrapped bare file, the file's own bytes — the artifact's
-// single layer — so that a name recorded by `oci import f` and one recorded
-// by `blob add f` resolve to the same key and the OCI scaffolding is
-// addressed by its index CID, not by name).
+// archive layout (plain, or gzip-compressed — a .tgz/.tar.gz), or (falling
+// back) a bare file wrapped as a single-layer artifact. It returns the source,
+// a closer the caller must invoke (nil otherwise), and the name target: the
+// digest whose store key the name index should record names against ("" for a
+// genuine layout, which names its index; for a wrapped bare file, the file's
+// own bytes — the artifact's single layer — so that a name recorded by
+// `oci import f` and one recorded by `blob add f` resolve to the same key and
+// the OCI scaffolding is addressed by its index CID, not by name).
+//
+// Routing is content-based, in this order:
+//
+//  1. a tar whose contents parse as a layout (index.json + ≥1 manifest) →
+//     the layout's blobs; for a gzip file, decompressed to a temp file first;
+//  2. a tar without index.json (e.g. a legacy docker archive) or a gzip that
+//     is not a tar → warn, then a single-layer artifact of the file's own
+//     bytes;
+//  3. anything else → a single-layer artifact of the file's own bytes.
 func openLayoutSource(arg string) (layoutSource, func(), oci.Digest, error) {
 	// A directory is an OCI layout.
 	if info, err := os.Stat(arg); err == nil && info.IsDir() {
@@ -189,11 +199,49 @@ func openLayoutSource(arg string) (layoutSource, func(), oci.Digest, error) {
 
 	// A file: try to read it as a tar layout (docker-save / podman-save output,
 	// including the v25+ "hybrid", whose OCI half we read and docker half we
-	// ignore). If it has no index.json it is not an OCI layout, so wrap the
-	// whole file as a single-layer artifact.
+	// ignore).
 	f, err := os.Open(arg)
 	if err != nil {
 		return nil, nil, "", err
+	}
+	if isGzip(f) {
+		// A gzip stream is not a tar: decompress it to a temp file and read
+		// that as the tar. The temp file stays open for TarFileSource's seeks,
+		// so the successful source's closer removes and closes it; the raw
+		// source f is dropped along the way.
+		dir, err := filepath.Abs(filepath.Dir(arg))
+		if err != nil {
+			_ = f.Close()
+			return nil, nil, "", err
+		}
+		tmp, err := os.CreateTemp(dir, filepath.Base(arg)+".gunzipped-*.tmp")
+		if err != nil {
+			_ = f.Close()
+			return nil, nil, "", err
+		}
+		if err := gunzipTo(f, tmp); err != nil {
+			_ = f.Close()
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			return nil, nil, "", fmt.Errorf("oci: %s is not a valid gzip stream: %v", arg, err)
+		}
+		_ = f.Close()
+		// gunzipTo read src and wrote tmp (leaving its position at the end);
+		// rewind it so the tar scan below reads from the start.
+		_, _ = tmp.Seek(0, io.SeekStart)
+		if src, err := oci.NewTarFileSource(tmp); err == nil {
+			if _, err := src.IndexBytes(); err == nil {
+				return src, func() {
+					_ = tmp.Close()
+					_ = os.Remove(tmp.Name())
+				}, "", nil
+			}
+		}
+		// A gzip that is not a tar layout (or a layout with no index.json)
+		// still means the *raw* file is the artifact, not its contents.
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return artifactWrap(arg)
 	}
 	if src, err := oci.NewTarFileSource(f); err == nil {
 		if _, err := src.IndexBytes(); err == nil {
@@ -211,7 +259,14 @@ func openLayoutSource(arg string) (layoutSource, func(), oci.Digest, error) {
 	}
 	_ = f.Close()
 
-	// Not a tar layout: wrap the file as a single-layer artifact.
+	// Not a (gzip) tar layout: a bare file — wrap it as a single-layer artifact.
+	return artifactWrap(arg)
+}
+
+// artifactWrap wraps a bare file as a single-layer OCI artifact (its own bytes
+// as the layer — the digest recorded as nameTarget, matching `blob add`; the
+// index/manifest/config are the scaffold addressed by their own CIDs).
+func artifactWrap(arg string) (layoutSource, func(), oci.Digest, error) {
 	size, err := fileSize(arg)
 	if err != nil {
 		return nil, nil, "", err
@@ -236,6 +291,40 @@ func openLayoutSource(arg string) (layoutSource, func(), oci.Digest, error) {
 		return nil, nil, "", err
 	}
 	return &artifactSource{a: a, layer: layer, size: size}, func() { _ = layer.Close() }, layerDigest, nil
+}
+
+// gzipMagic are the leading two bytes of every gzip stream (RFC 1952).
+var gzipMagic = []byte{0x1f, 0x8b}
+
+// isGzip reports whether r's first two bytes are the gzip magic, and rewinds r
+// to the start so the caller can still read the whole stream.
+func isGzip(r *os.File) bool {
+	head := make([]byte, 2)
+	m, _ := io.ReadFull(r, head)
+	gzip := m == 2 && bytes.Equal(head[:2], gzipMagic)
+	_, _ = r.Seek(0, io.SeekStart)
+	return gzip
+}
+
+// gunzipTo streams the gzip at src decompressed into dst (appending). src and
+// dst are not closed by this; the caller owns both and must Close dst (its
+// Sync is what commits the data, so close it after the read the caller needs).
+func gunzipTo(src *os.File, dst *os.File) error {
+	gz, err := gzip.NewReader(src)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(dst, gz); err != nil {
+		_ = gz.Close()
+		return err
+	}
+	if err := gz.Close(); err != nil {
+		return err
+	}
+	if err := dst.Sync(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // fileSize returns the size of a regular file.
