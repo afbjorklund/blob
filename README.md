@@ -88,20 +88,20 @@ blob --help
 ### Compute / verify hashes (like `sha256sum`, but CIDs)
 
 ```bash
-blob hash <file>...            # print one line per file:  <cid>  <file>
-blob hash -c <list> [<list>...]# verify the lines of a checksum list against local files
-blob hash -c -i <list>         # -i/--ignore-missing: skip files that are not present
+blob sum <file>...             # print one line per file:  <cid>  <file>    (hash is an alias)
+blob sum -c <list> [<list>...] # verify the lines of a checksum list against local files
+blob sum -c -i <list>          # -i/--ignore-missing: skip files that are not present
 ```
 
-**Compute.** `blob hash <file>...` prints each file's CID `sha256sum`-style —
+**Compute.** `blob sum <file>...` (alias `hash`) prints each file's CID `sha256sum`-style —
 `<cid>  <file>` (two spaces), one line per file — without storing anything. A
 convenience so you don't need a shell wrapper to turn files into addresses
 (same family as `lookup` and `ipfs add --only-hash`). Files are hashed
 independently: an unreadable file reports its own `Error:` line and a
 non-zero exit, but the other files still produce their lines.
 
-**Verify.** `blob hash -c <list>` reads one or more checksum lists whose lines
-are `<cid>  <file>` (exactly the shape of `blob hash` output) and, for each
+**Verify.** `blob sum -c <list>` reads one or more checksum lists whose lines
+are `<cid>  <file>` (exactly the shape of `blob sum` output) and, for each
 line, recomputes the *local* `file`'s CID and reports
 
 - `<file>: OK` — the local file hashes to the CID on the line;
@@ -131,7 +131,7 @@ blob add <file>
 Options:
 
 - `--storage dir|sql|http|s3` - Storage backend (default: `dir`)
-- `--only-hash` / `-n` - print `added <cid> <file>` like `blob hash`, but do
+- `--only-hash` / `-n` - print `added <cid> <file>` like `blob sum`, but do
   **not** store (and record no index name)
 - `--path <dir|dbfile|url>` - Storage location (a local dir/dbfile for `dir`/`sql`;
   a base URL for `http`; an endpoint URL for `s3`)
@@ -220,7 +220,7 @@ blob lookup <name>
 ```
 
 Convenience wrapper: resolves an index name to the stored blob's CID by peeking
-the blob's first byte (the same content-based codec rule as `add`/`hash`) — no
+the blob's first byte (the same content-based codec rule as `add`/`sum`) — no
 re-hash, bounded by one byte regardless of blob size. Not required (the CID is
 on disk / in the index), but handy:
 

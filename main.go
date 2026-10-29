@@ -234,13 +234,14 @@ func main() {
 	rootCmd.AddCommand(addCmd)
 
 	hashCmd := &cobra.Command{
-		Use:   "hash <file>...",
-		Short: "Compute and print the CID of each file without storing it",
+		Use:     "sum <file>...",
+		Aliases: []string{"hash"},
+		Short:   "Compute and print the CID of each file without storing it",
 		Long: `Compute and print the CID of each given file, one per line (like sha256sum):
   <CID>  <file>
 
 With -c/--check the argument is instead a checksum list (one <CID>  <file> per
-line, as produced by hash) and each line is verified against the local file
+line, as produced by sum) and each line is verified against the local file
 named on it, reporting one line per entry (<file>: OK, <file>: FAILED, or
 <file>: FAILED open or read for a file that could not be read). -i/--ignore-
 missing skips files that cannot be read instead of failing with a WARNING.

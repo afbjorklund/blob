@@ -176,7 +176,7 @@ func (s *Server) serveIPFS(w http.ResponseWriter, r *http.Request, ref string) {
 
 // serveName resolves an index name to its blob, derives the blob's CID
 // by peeking the first byte (the same content-based codec rule as
-// `add`/`hash`), and issues a 302 redirect to /blob/<CID>. The redirect
+// `add`/`sum`), and issues a 302 redirect to /blob/<CID>. The redirect
 // is the name→blob pointer (mirroring the dir backend's symlink for the
 // same role) and leaves all streaming / header work to /blob/<CID>.
 // 302 (not 301): the name→CID mapping is mutable (last add wins), so it

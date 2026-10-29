@@ -86,7 +86,7 @@ own data (no CID decoding step).
   read plus composition replaces the old "store the string" and the
   old full-file re-hashing: nothing is lost by dropping the CID string,
   and a 4 GB SIF costs the same as a 12 B config. (`lookup` is a pure
-  convenience, like `hash`/`ipfs add --only-hash`; the CID is always
+  convenience, like `sum`/`ipfs add --only-hash`; the CID is always
   recomputable from the store.)
 - Dir backend: the index entry is a symlink
   `index/<name> -> ../<byte0>/<byte1>/<byte2>/<rest>` pointing at the
