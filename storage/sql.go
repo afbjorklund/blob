@@ -198,10 +198,10 @@ func (s *SQLStorage) Put(hash Digest, size int64, r io.Reader) error {
 	return nil
 }
 
-func (s *SQLStorage) Get(hash Digest) (io.ReadCloser, int64, int64, error) {
+func (s *SQLStorage) Get(hash Digest) (io.ReadCloser, Stat, error) {
 	conn, err := s.take(context.Background())
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, Stat{}, err
 	}
 
 	var (
@@ -226,20 +226,22 @@ func (s *SQLStorage) Get(hash Digest) (io.ReadCloser, int64, int64, error) {
 	)
 	if qerr != nil {
 		s.put(conn)
-		return nil, 0, 0, qerr
+		return nil, Stat{}, qerr
 	}
 	if !found {
 		s.put(conn)
-		return nil, 0, 0, errors.New("blob not found")
+		return nil, Stat{}, errors.New("blob not found")
 	}
 
 	blob, err := conn.OpenBlob("", "blobs", "data", rowid, false)
 	if err != nil {
 		s.put(conn)
-		return nil, 0, 0, err
+		return nil, Stat{}, err
 	}
 
-	return &connReader{blob: blob, conn: conn, put: s.put}, size, mtime, nil
+	// The blob is a row in a database file, not a file of its own, so Path
+	// is empty.
+	return &connReader{blob: blob, conn: conn, put: s.put}, Stat{Size: size, Mtime: mtime}, nil
 }
 
 func (s *SQLStorage) Has(hash Digest) (bool, error) {

@@ -136,7 +136,7 @@ func outerCIDByIndex(t *testing.T, be storage.StorageBackend, idxD oci.Digest) s
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, _, _, err := be.Get(id)
+	r, _, err := be.Get(id)
 	if err != nil {
 		t.Fatal(err)
 	}

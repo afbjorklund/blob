@@ -92,19 +92,20 @@ func (s *DirStorage) Put(hash Digest, size int64, r io.Reader) error {
 	return os.Rename(tmpPath, dst)
 }
 
-func (s *DirStorage) Get(hash Digest) (io.ReadCloser, int64, int64, error) {
-	f, err := os.Open(filepath.Join(s.rootDir, s.relPath(hash)))
+func (s *DirStorage) Get(hash Digest) (io.ReadCloser, Stat, error) {
+	dst := filepath.Join(s.rootDir, s.relPath(hash))
+	f, err := os.Open(dst)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, Stat{}, err
 	}
 
 	stat, err := f.Stat()
 	if err != nil {
 		_ = f.Close()
-		return nil, 0, 0, err
+		return nil, Stat{}, err
 	}
 
-	return f, stat.Size(), stat.ModTime().Unix(), nil
+	return f, Stat{Size: stat.Size(), Mtime: stat.ModTime().Unix(), Path: dst}, nil
 }
 
 func (s *DirStorage) Has(hash Digest) (bool, error) {

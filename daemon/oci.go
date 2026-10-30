@@ -100,7 +100,7 @@ func newOCIRepo(backend storage.StorageBackend, repo string) (*ociRepo, error) {
 		return nil, err
 	}
 
-	r, _, _, err := backend.Get(key)
+	r, _, err := backend.Get(key)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +246,7 @@ func serveV2Manifest(w http.ResponseWriter, r *http.Request, obj *ociRepo, ref s
 		return
 	}
 
-	reader, _, _, err := obj.backend.Get(id)
+	reader, _, err := obj.backend.Get(id)
 	if err != nil {
 		ociError(w, http.StatusNotFound, "MANIFEST_UNKNOWN", d.String())
 		return
@@ -326,7 +326,7 @@ func serveV2Blob(w http.ResponseWriter, r *http.Request, obj *ociRepo, ref strin
 		return
 	}
 
-	reader, size, _, err := obj.backend.Get(id)
+	reader, stat, err := obj.backend.Get(id)
 	if err != nil {
 		ociError(w, http.StatusNotFound, "BLOB_UNKNOWN", d.String())
 		return
@@ -335,7 +335,7 @@ func serveV2Blob(w http.ResponseWriter, r *http.Request, obj *ociRepo, ref strin
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Docker-Content-Digest", d.String())
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Content-Length", strconv.FormatInt(stat.Size, 10))
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
 		return

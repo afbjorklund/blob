@@ -160,9 +160,12 @@ BACKEND.md describes the *contract*. The Go-side mechanics:
   (`storage.ReadOnly` / `storage.ReadWrite`) via `NewStorage`: `add` opens
   ReadWrite, `get`/`lookup`/`serve` open ReadOnly. A ReadOnly backend
   refuses `Put`/`Index` with `storage.ErrReadOnly` and neither creates the
-  store nor touches it. `Get` streams and returns `(io.ReadCloser, size,
-  mtime, err)` — the sql backend's `mtime` is its `mtime` column in Unix
-  seconds, 0 when the backend does not track one.
+  store nor touches it. `Get` streams and returns `(io.ReadCloser, Stat,
+  err)` — `Stat` carries the size, the store's last-modified time in Unix
+  seconds (0 when the backend does not track one), and the local filesystem
+  path (dir only; empty on sql/s3/http — the blob is a row / object / remote
+  body, not a local file). `get --only-size` / `--only-mtime` / `--only-path`
+  project those three fields without fetching the bytes.
 - **Concurrency, per backend.** `sql` is a `zombiezen.com/go/sqlite/sqlitex`
   **`Pool`** (size 10), not one `*sqlite.Conn` (a single C handle, not safe
   concurrently): each op checks a conn out and back; `Get`'s reader keeps

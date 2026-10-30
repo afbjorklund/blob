@@ -250,22 +250,22 @@ func (s *HTTPStorage) Put(hash Digest, size int64, r io.Reader) error {
 	return nil
 }
 
-func (s *HTTPStorage) Get(hash Digest) (io.ReadCloser, int64, int64, error) {
+func (s *HTTPStorage) Get(hash Digest) (io.ReadCloser, Stat, error) {
 	req, err := http.NewRequest(http.MethodGet, s.blobURL(hash), nil)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, Stat{}, err
 	}
 
 	resp, err := s.do(req, http.MethodGet, hex.EncodeToString(hash))
 	if err != nil {
 		if notFound(err) {
-			return nil, 0, 0, errors.New("blob not found")
+			return nil, Stat{}, errors.New("blob not found")
 		}
-		return nil, 0, 0, err
+		return nil, Stat{}, err
 	}
 
 	// mtime comes from the server's Last-Modified header (RFC 7231 date). A
-	// well-behaved server returns it; a server that does not leaves it 0
+	// well-behaved server returns it; a server that does not leaves Mtime 0
 	// (the documented "unknown" sentinel), and callers must treat that as
 	// "no time available" — in particular the gateway omits Last-Modified
 	// for such blobs and `get --only-mtime` prints 0. We do not fabricate
@@ -280,8 +280,9 @@ func (s *HTTPStorage) Get(hash Digest) (io.ReadCloser, int64, int64, error) {
 	}
 
 	// resp.Body is the io.ReadCloser the caller streams from; closing it
-	// releases the connection back to the transport pool.
-	return resp.Body, resp.ContentLength, mtime, nil
+	// releases the connection back to the transport pool. The blob is a
+	// remote response body, not a local file, so Path is empty.
+	return resp.Body, Stat{Size: resp.ContentLength, Mtime: mtime}, nil
 }
 
 func (s *HTTPStorage) Has(hash Digest) (bool, error) {

@@ -35,11 +35,12 @@ func (s source) Get(d oci.Digest) (io.ReadCloser, int64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	// The store backend's Get now also returns an mtime; this reader only
-	// needs the size and content, so we drop it (a 0 is treated as "unknown"
-	// by callers, which is what an oci.Source consumer would expect anyway).
-	r, size, _, err := s.backend.Get(id)
-	return r, size, err
+	// The store backend's Get returns the blob's Stat (size, mtime, local
+	// path); this reader only needs the size and content, so we drop the
+	// rest (a 0 Mtime / empty Path is "not tracked" / "not a local file",
+	// which an oci.Source consumer does not use anyway).
+	r, st, err := s.backend.Get(id)
+	return r, st.Size, err
 }
 
 // digestFromCID returns the storage key for c, validating that the CID carries
@@ -92,7 +93,7 @@ func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request, ref string) {
 		return
 	}
 
-	reader, size, mtime, err := s.backend.Get(digest)
+	reader, stat, err := s.backend.Get(digest)
 	if err != nil {
 		http.Error(w, "not found: "+ref, http.StatusNotFound)
 		return
@@ -106,15 +107,15 @@ func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request, ref string) {
 	}
 
 	w.Header().Set("Content-Digest", contentDigest)
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Content-Length", strconv.FormatInt(stat.Size, 10))
 	w.Header().Set("Content-Type", cid.MediaType(c))
 	// Last-Modified (RFC 7231) is the store's last-modified time for this
 	// blob: the moment it was added to the store (not a client-supplied time,
 	// and not the content's mtime). We omit it when the backend does not
-	// track it (stored as 0), so a client that does a conditional GET
+	// track it (Stat.Mtime == 0), so a client that does a conditional GET
 	// (If-Modified-Since) against a backend without this field still works.
-	if mtime > 0 {
-		w.Header().Set("Last-Modified", time.Unix(mtime, 0).UTC().Format(http.TimeFormat))
+	if stat.Mtime > 0 {
+		w.Header().Set("Last-Modified", time.Unix(stat.Mtime, 0).UTC().Format(http.TimeFormat))
 	}
 
 	w.WriteHeader(http.StatusOK)

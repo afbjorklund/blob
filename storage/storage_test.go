@@ -417,15 +417,15 @@ func TestRoundTrip(t *testing.T) { //nolint:gocyclo
 
 			// Get streams the exact bytes back.
 			for _, e := range entries {
-				r, size, mtime, err := w.Get(e.key)
+				r, st, err := w.Get(e.key)
 				if err != nil {
 					t.Fatalf("Get(%q): %v", e.key, err)
 				}
-				if size != int64(len(e.value)) {
-					t.Fatalf("Get(%q) size = %d; want %d", e.key, size, len(e.value))
+				if st.Size != int64(len(e.value)) {
+					t.Fatalf("Get(%q) size = %d; want %d", e.key, st.Size, len(e.value))
 				}
-				if mtime <= 0 {
-					t.Fatalf("Get(%q) mtime = %d; want > 0 (the backend's last-modified time)", e.key, mtime)
+				if st.Mtime <= 0 {
+					t.Fatalf("Get(%q) mtime = %d; want > 0 (the backend's last-modified time)", e.key, st.Mtime)
 				}
 				got, rerr := io.ReadAll(r)
 				if err := r.Close(); err != nil {
@@ -733,7 +733,7 @@ func TestConcurrentReads(t *testing.T) {
 // readBlob streams a blob and returns its full content, closing the reader
 // (which returns the backend's pooled connection) on the way out.
 func readBlob(b StorageBackend, key Digest) ([]byte, error) {
-	r, _, _, err := b.Get(key)
+	r, _, err := b.Get(key)
 	if err != nil {
 		return nil, err
 	}

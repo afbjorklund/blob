@@ -168,6 +168,11 @@ Options:
 - `--only-size` - Print only the blob size in bytes (do not retrieve the blob)
 - `--only-mtime` - Print only the blob's last-modified time in Unix seconds (do
   not retrieve the blob)
+- `--only-path` - Print only the blob's local filesystem path (do not retrieve
+  the blob). **dir backend only** — on sql/s3/http the blob is a row, an
+  object, or a remote body, not a local file, so the command errors out with a
+  hint to use `get` to materialize a local file first. `apptainer run <path>`
+  then runs straight from the store's dir.
 - `--verify` - Re-hash the retrieved data against the blob's resolved multihash
   and fail if the content does not match. The data is downloaded to a temporary
   file and renamed into place only after the check passes, so a failed

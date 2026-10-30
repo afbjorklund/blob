@@ -30,6 +30,7 @@ var (
 	outputPath  string
 	onlySize    bool
 	onlyMtime   bool
+	onlyPath    bool
 	getVerify   bool
 	getForce    bool
 	hashOnly    bool
@@ -282,6 +283,7 @@ lines.`,
 	getCmd.Flags().StringVarP(&outputPath, "output", "o", "", "output file path")
 	getCmd.Flags().BoolVarP(&onlySize, "only-size", "", false, "print only the blob size in bytes, do not retrieve the blob")
 	getCmd.Flags().BoolVarP(&onlyMtime, "only-mtime", "", false, "print only the blob's last-modified time in Unix seconds, do not retrieve the blob")
+	getCmd.Flags().BoolVarP(&onlyPath, "only-path", "", false, "print only the local filesystem path of the blob, do not retrieve it (dir backend only; errors on sql/s3/http, where the blob is not a local file)")
 	getCmd.Flags().BoolVarP(&getVerify, "verify", "", false, "re-hash the downloaded data against the resolved multihash and fail the get on a mismatch (the file is not completed)")
 	getCmd.Flags().BoolVarP(&getForce, "force", "f", false, "overwrite the output file if it already exists (otherwise the get fails)")
 
@@ -714,19 +716,27 @@ func runGet(cmd *cobra.Command, args []string) error {
 	}
 	defer backend.Close()
 
-	reader, size, mtime, err := backend.Get(digest)
+	reader, stat, err := backend.Get(digest)
 	if err != nil {
 		return err
 	}
 	defer reader.Close()
 
 	if onlySize {
-		fmt.Println(size)
+		fmt.Println(stat.Size)
 		return nil
 	}
 
 	if onlyMtime {
-		fmt.Println(mtime)
+		fmt.Println(stat.Mtime)
+		return nil
+	}
+
+	if onlyPath {
+		if stat.Path == "" {
+			return errors.New("--only-path is only supported by the dir backend (the blob is not a local file there); use `blob get` to materialize a local file first")
+		}
+		fmt.Println(stat.Path)
 		return nil
 	}
 
@@ -746,7 +756,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	pr := progress.NewReader(reader, size)
+	pr := progress.NewReader(reader, stat.Size)
 	_, err = io.Copy(out, pr)
 	pr.Finish()
 	if err != nil {
@@ -820,7 +830,7 @@ func runCat(cmd *cobra.Command, args []string) error {
 	}
 	defer backend.Close()
 
-	reader, _, _, err := backend.Get(digest)
+	reader, _, err := backend.Get(digest)
 	if err != nil {
 		return err
 	}
@@ -907,8 +917,8 @@ func runList(cmd *cobra.Command, args []string) error {
 					info.cid = r
 				}
 			}
-			if reader, sz, _, gerr := backend.Get(key); gerr == nil {
-				info.size = sz
+			if reader, st, gerr := backend.Get(key); gerr == nil {
+				info.size = st.Size
 				_ = reader.Close()
 			} else {
 				info.size = -1

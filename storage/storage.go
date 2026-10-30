@@ -49,6 +49,34 @@ var ErrReadOnly = errors.New("storage: read-only backend, cannot write")
 // API itself is algorithm-agnostic.
 type Digest = []byte
 
+// Stat is the per-blob metadata a backend reports alongside a Get. It
+// groups the three values the CLI's probe flags project (the `--only-size`,
+// `--only-mtime`, and `--only-path` flags are three views of one struct, so
+// the metadata lives in one type rather than as a growing list of loose
+// return values):
+//
+//   - Size:  bytes in the blob.
+//   - Mtime: the store's last-modified time for this blob as Unix seconds,
+//     i.e. the moment it was added to *this* store (not the content's own
+//     mtime). 0 means "the backend does not track one"; callers should
+//     treat 0 as unknown and omit it from output. The value is
+//     *store-scoped*: the same blob stored in two stores has two different
+//     mtime values. That's the whole contract — a stable, backend-honest
+//     number clients can use as a cache predicate; the authoritative
+//     content check stays `Content-Digest` / `identity.Check`.
+//   - Path:  the local filesystem path the blob lives at, when the backend
+//     keeps it on a local disk. For the dir backend this is
+//     `<root>/<b0>/<b1>/...`, the same path `Get` opens — returned for free
+//     because the backend already computed it. For backends that do not
+//     have a local file (sql: a row; s3: an object key under the endpoint;
+//     http: a remote URL) `Path` is empty. An empty `Path` means "not a
+//     local file", not "empty path"; do not pass it to `os.Open`.
+type Stat struct {
+	Size  int64
+	Mtime int64
+	Path  string
+}
+
 // StorageBackend is a content-addressable blob store keyed by multihash. A
 // value is opened in one Mode via NewStorage: a ReadOnly value serves the
 // read path (Get / Has / Peek / Lookup) and a ReadWrite value additionally
@@ -59,14 +87,15 @@ type StorageBackend interface {
 	// Put stores the blob r under hash. On a read-only backend it always
 	// returns ErrReadOnly without touching the store.
 	Put(hash Digest, size int64, r io.Reader) error
-	// Get streams the stored blob. The returned ReadCloser is the reader;
-	// Close it to release it (the sql backend releases the pooled connection
-	// it was opened on, so Close must be called whether or not the read
-	// completed). The second value is the blob size in bytes, the third the
-	// blob's last-modified time as Unix seconds (0 when the backend does not
-	// track it — in that case callers must treat the value as "unknown" and
-	// typically omit it from any output).
-	Get(hash Digest) (io.ReadCloser, int64, int64, error)
+	// Get streams the stored blob together with its metadata (Stat) in a
+	// single call, so probing the size/mtime/path and streaming the content
+	// are one round trip rather than two. The returned ReadCloser is the
+	// reader; Close it to release it (the sql backend releases the pooled
+	// connection it was opened on, so Close must be called whether or not
+	// the read completed). The Stat's zero-meaning is per field (see Stat):
+	// a backend that does not track a field leaves it zero / empty rather
+	// than erroring.
+	Get(hash Digest) (io.ReadCloser, Stat, error)
 	Has(hash Digest) (bool, error)
 	// Index records a name→hash association. On a read-only backend it
 	// always returns ErrReadOnly without touching the store.

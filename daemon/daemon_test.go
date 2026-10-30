@@ -51,14 +51,14 @@ func (m *memBackend) Put(hash storage.Digest, size int64, r io.Reader) error {
 // the gateway's serveBlob does not apply here.
 const testMtime = int64(1000000000)
 
-func (m *memBackend) Get(hash storage.Digest) (io.ReadCloser, int64, int64, error) {
+func (m *memBackend) Get(hash storage.Digest) (io.ReadCloser, storage.Stat, error) {
 	m.mu.Lock()
 	b, ok := m.blobs[string(hash)]
 	m.mu.Unlock()
 	if !ok {
-		return nil, 0, 0, errors.New("not found")
+		return nil, storage.Stat{}, errors.New("not found")
 	}
-	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), testMtime, nil
+	return io.NopCloser(bytes.NewReader(b)), storage.Stat{Size: int64(len(b)), Mtime: testMtime}, nil
 }
 
 func (m *memBackend) Has(hash storage.Digest) (bool, error) {
@@ -86,7 +86,7 @@ func (m *memBackend) Lookup(name string) (storage.Digest, error) {
 }
 
 func (m *memBackend) Peek(hash storage.Digest, n int) ([]byte, error) {
-	r, _, _, err := m.Get(hash)
+	r, _, err := m.Get(hash)
 	if err != nil {
 		return nil, err
 	}
