@@ -227,11 +227,14 @@ OCI on the wire*. That means:
 That is the whole OCI story, conceptually. No push, no tag map, no auth, no
 HTTPS — but the `serve` command *does* speak the OCI distribution **read** API
 (`/v2/<repo>/manifests/<ref>`, `/v2/<repo>/blobs/<sha256:...>`), with the
-repository name being the very CID `oci import` printed (primary) or a stored
-name (secondary). The only tag is `latest`; inner components are still
-addressed by their `sha256:` digest. This is a *read-only registry endpoint*
-on the same backend `serve` already exposes — stock clients (podman, skopeo,
-oras, buildkit) can pull a layout in one shot, no `oci export` step needed.
+repository name being the very CID `oci import` printed (primary), a stored
+name (secondary), or — for a stored *bare file* — either that name or its CID
+(the `/v2/` surface rebuilds the artifact scaffold on demand, from the stored
+bytes, without ever adding it to the CAS). The only tag is `latest`; inner
+components are still addressed by their `sha256:` digest. This is a
+*read-only registry endpoint* on the same backend `serve` already exposes —
+stock clients (podman, skopeo, oras, buildkit) can pull a layout in one shot,
+no `oci export` step needed.
 That is why `oci` is a small set of sub-packages (`identity` for the
 digest⇄multihash bridge, `oci` for the layout, `cid` for the store's CID
 conventions) and not a full registry implementation.

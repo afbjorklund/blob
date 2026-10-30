@@ -127,6 +127,17 @@ subsystem:
   half, ignore the docker half. A bare file (no layout) is wrapped as
   a single-layer **artifact**: the canonical empty-config `{}` + one
   layer.
+- **The artifact is a pure function of the layer.** For a single
+  layer, the whole OCI scaffold (`index.json`, its manifest, the
+  `{}` config) is determined by content alone — the layer digest,
+  its size, and the SIF-vs-generic media types, all re-derived from
+  the bytes. We exploit this on the read/interop side: `oci export`
+  and the `/v2/` registry surface serve the scaffold **from memory**,
+  constructed on demand, and *never persist it* — so a `blob add`-ed
+  file and an `oci import`-ed copy are both exportable and pullable as
+  an OCI artifact, with no OCI JSON added to the CAS. `oci ls` keeps
+  the opposite policy (it *reports* the store): it lists an artifact
+  only when `oci import` actually persisted its scaffold.
 - **Streams, no materialization.** A layer may be GB/TB, so
   `oci add`/`oci get` stream blobs between the layout and the backend
   byte-for-byte; only `index.json` and manifests are small enough to
