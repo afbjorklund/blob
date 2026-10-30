@@ -38,6 +38,7 @@ var (
 	hashIgnore  bool
 	listLong    bool
 	listenAddr  string
+	lookupOci   bool
 	httpUser    string
 	httpPass    string
 	// OCI import/export
@@ -304,6 +305,8 @@ lines.`,
 		Args:  cobra.ExactArgs(1),
 		RunE:  runLookup,
 	}
+
+	lookupCmd.Flags().BoolVar(&lookupOci, "oci", false, "print the OCI digest (sha256:<hex>) instead of the CID, to compare with `oci ls` output")
 
 	rootCmd.AddCommand(lookupCmd)
 
@@ -854,6 +857,15 @@ func runLookup(cmd *cobra.Command, args []string) error {
 	digest, err := backend.Lookup(name)
 	if err != nil {
 		return fmt.Errorf("%q: name not found in index", name)
+	}
+
+	if lookupOci {
+		oci, err := identity.ToOCI(identity.Identity(digest))
+		if err != nil {
+			return err
+		}
+		fmt.Println(oci)
+		return nil
 	}
 
 	c, err := cidForDigest(backend, digest)

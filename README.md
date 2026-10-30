@@ -234,6 +234,15 @@ blob lookup ubuntu_latest.sif
 v05ah4859p5vrofmfpdv5i8om998c9k4gd0ge2shctr5jofc6ufj3ghgf8k
 ```
 
+`--oci` prints the blob's OCI digest (`sha256:<hex>`) instead of its CID — the
+same form the layer digests in `oci ls` output use, so the two can be compared
+directly:
+
+```bash
+blob lookup --oci ubuntu_latest.sif
+sha256:d79f2e37784e5cd8631963896ebc6c9c66934af94a1854504717eaec04bc3d09
+```
+
 ### Inspect a CID
 
 ```bash
