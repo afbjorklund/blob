@@ -140,14 +140,24 @@ func (t *TarSink) Put(d Digest, size int64, r io.Reader) error {
 	return err
 }
 
-// PutIndex writes index.json (creating it if it has not been written yet).
+// PutIndex writes the oci-layout marker and index.json (once each).
 func (t *TarSink) PutIndex(indexBytes []byte) error {
-	const name = "index.json"
-	if t.seen[name] {
+	if !t.seen["oci-layout"] {
+		t.seen["oci-layout"] = true
+		b := []byte(layoutDoc)
+		hdr := &tar.Header{Name: "oci-layout", Mode: 0644, Size: int64(len(b))}
+		if err := t.w.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if _, err := t.w.Write(b); err != nil {
+			return err
+		}
+	}
+	if t.seen["index.json"] {
 		return nil
 	}
-	t.seen[name] = true
-	hdr := &tar.Header{Name: name, Mode: 0644, Size: int64(len(indexBytes))}
+	t.seen["index.json"] = true
+	hdr := &tar.Header{Name: "index.json", Mode: 0644, Size: int64(len(indexBytes))}
 	if err := t.w.WriteHeader(hdr); err != nil {
 		return err
 	}
