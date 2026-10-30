@@ -77,9 +77,15 @@ func TestServeSmoke(t *testing.T) {
 // facts the smoke protocol needs: the name it is indexed under, the outer
 // (index-root) CID, the root object (the index bytes), and the root's OCI
 // digest (addressable at the /v2/ blobs endpoint like any reachable blob).
-// nameIsIndex is false for a stored artifact's file-name (which, by the
-// CLI's naming policy, points at the file's bytes rather than the scaffold)
-// — the by-name subtests then skip for that puller.
+//
+// nameIsIndex is false for a stored bare-file artifact, whose name the CLI
+// records against the file's bytes (not the scaffold) — `oci import` of a
+// bare file and `blob add` of the same file both name the layer. The plain-
+// HTTP /name/<name> surface (a 302 to the blob's own CID) therefore still
+// skips for that puller (the raw-layer CID, not the artifact's index CID).
+// The OCI /v2/ name surface, by contrast, synthesizes the canonical artifact
+// scaffold on demand (matching `oci export`), so its by-name subtest
+// *does* run, and the root it serves is the same synthesized index bytes p.idx.
 type puller struct {
 	name        string
 	cid         string
@@ -242,12 +248,10 @@ func serveProtocol(t *testing.T, base string, p puller) {
 		assertXBlobCid(t, hdr, p.cid)
 	})
 
+	// The /v2/ name surface now synthesizes the artifact scaffold for a
+	// bare-file artifact, so its name (which the CLI records against the file
+	// bytes, not the index) does resolve to the artifact's index — no skip.
 	t.Run("OCI root by name (X-Blob-Cid)", func(t *testing.T) {
-		if !p.nameIsIndex {
-			// The artifact's name resolves to file bytes; the OCI by-name
-			// surface would try to parse them as an index and 404.
-			t.Skip("artifact name points at the file's bytes, not the index")
-		}
 		body, hdr, code, err := curlGET(t, base+"/v2/name/"+p.name+"/manifests/latest")
 		if err != nil || code != "200" {
 			t.Fatalf("GET /v2/name/<name>/manifests/latest = %q (%s): %v; want 200", body, code, err)

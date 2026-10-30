@@ -130,6 +130,71 @@ func firstByteCodec(b []byte) cid.Code {
 	return cid.CodeRaw
 }
 
+// isJSONHead reports whether head's first byte is JSON under the store's
+// content-based codec rule (the same rule `add` stores by and `lookup`
+// re-derives by, via cid.CodecForFirstByte) — the only shape an OCI index.json
+// can take. An empty head (empty blob) is reported as non-JSON, which is the
+// correct discriminator for `oci ls` of an empty blob.
+func isJSONHead(head []byte) bool {
+	return len(head) > 0 && cid.CodecForFirstByte(head[0]) == cid.CodeJson
+}
+
+// artifactFor reconstructs the single-blob OCI artifact scaffold that `oci
+// import` builds for a stored layer: the index.json and manifest of a
+// one-layer artifact whose layer is the blob key k, sized size bytes and typed
+// by the same content-based rule the import path uses (SIF → SIF media types,
+// anything else → the generic ones). All four inputs are re-derived from the
+// stored content, so the result is byte-identical to the scaffold `oci import`
+// persists for the same file — the key's digest is the layer digest, the size
+// is the layer's size, and the media types come from the layer's own bytes.
+// The layer itself is not buffered or hashed: NewArtifact is a pure function
+// of these four values.
+func artifactFor(k identity.Identity, size int64, head []byte) (*oci.Artifact, error) {
+	d, err := identity.ToOCI(k)
+	if err != nil {
+		return nil, err
+	}
+	cfgMT, layerMT := oci.MediaTypesFor(head)
+	return oci.NewArtifact(d, size, layerMT, cfgMT)
+}
+
+// scaffoldSource serves the in-memory scaffold blobs of a single-blob OCI
+// artifact — the index, the manifest, and the `{}` config — exactly as `oci
+// import` would build them, and streams the layer from the store. It backs
+// `oci export` of a bare file whose scaffold was never persisted (a `blob add`
+// of the same file, or a `blob add` first and then an `oci export` of the
+// layer): the output layout is a valid OCI artifact, and nothing is written
+// into the store by this path.
+type scaffoldSource struct {
+	a       *oci.Artifact
+	backend storage.StorageBackend
+}
+
+func (s scaffoldSource) Has(d oci.Digest) (bool, error) {
+	switch d {
+	case s.a.IndexDigest, s.a.ManifestDigest, s.a.ConfigDigest, s.a.LayerDigest:
+		return true, nil
+	}
+	return false, nil
+}
+
+func (s scaffoldSource) Get(d oci.Digest) (io.ReadCloser, int64, error) {
+	switch d {
+	case s.a.IndexDigest:
+		return io.NopCloser(bytes.NewReader(s.a.IndexBytes)), int64(len(s.a.IndexBytes)), nil
+	case s.a.ManifestDigest:
+		return io.NopCloser(bytes.NewReader(s.a.ManifestBytes)), int64(len(s.a.ManifestBytes)), nil
+	case s.a.ConfigDigest:
+		return io.NopCloser(bytes.NewReader(oci.EmptyConfig)), int64(len(oci.EmptyConfig)), nil
+	}
+	id, err := identity.FromOCI(d)
+	if err != nil {
+		return nil, 0, err
+	}
+	r, st, err := s.backend.Get(id)
+	return r, st.Size, err
+}
+
 // resolveStoreKey turns an `oci get/ls` argument into the store key (identity)
 // of its root object: parsed as a CID when possible, else via the name index.
 //
@@ -551,23 +616,52 @@ func recordNames(base string, extras []string, key identity.Identity, backend st
 	return records, skipped, nil
 }
 
-// requireOCIShape checks the resolved blob is stored under the JSON codec —
-// via the same first-byte Peek the codec rule itself uses (so the blob is
-// never read, only one byte), not by parsing it. An OCI index is always
-// JSON, so a non-JSON blob is not a layout; naming it as such (rather than
-// dumping a raw decode error over its first bytes) is the whole point.
-func requireOCIShape(key identity.Identity, backend storage.StorageBackend) error {
-	first, err := peekFirstByte(backend, storage.Digest(key))
+// firstIsJSON peeks the blob's first byte (the same content-based rule the
+// codec uses, so at most one byte is read) and reports whether it opens
+// a JSON value — '{' or '['. An OCI index.json always does. The rest of the
+// shape check is ParseIndex's: this function only disambiguates "index-shaped
+// blob" from "layer or other blob", the split `oci ls`/`oci export` need to
+// pick between the index path and the artifact path.
+func firstIsJSON(backend storage.StorageBackend, key identity.Identity) (bool, error) {
+	b, err := backend.Peek(storage.Digest(key), 1)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if cid.CodecForFirstByte(first) != cid.CodeJson {
-		return fmt.Errorf("not an OCI layout: the blob is not JSON, so it cannot be an index.json (it may have been added with `blob add`; `oci ls` needs the OCI index CID)")
-	}
-	return nil
+	return isJSONHead(b), nil
 }
 
-// runOCIExport writes a stored OCI layout to a directory or tar.
+// isOCILayout reports whether key's stored blob is a valid OCI index.json —
+// the JSON rule from firstIsJSON plus ParseIndex's shape check (the
+// mediaType and the "names at least one manifest" assertion). This is the
+// test `oci ls` runs before deciding the artifact fallback is inapplicable:
+// a bare `blob add`-ed file whose first byte happens to be '{' (a single-line
+// JSON value, for instance) parses as JSON but not as an index, and must still
+// be refused (by name) or wrapped (by digest) — not treated as an index that
+// `oci ls` would attempt to walk (its manifest would not be in the store).
+func isOCILayout(backend storage.StorageBackend, key identity.Identity) (bool, error) {
+	if json, err := firstIsJSON(backend, key); err != nil {
+		return false, err
+	} else if !json {
+		return false, nil
+	}
+	r, _, err := backend.Get(key)
+	if err != nil {
+		return false, err
+	}
+	defer r.Close()
+	_, err = oci.ParseIndex(r)
+	if err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+// runOCIExport writes a stored OCI layout to a directory or tar. An index blob
+// is copied out as-is; a layer blob (a bare file added via `oci import` or
+// `blob add`) is wrapped with its scaffold (index + manifest + `{}` config,
+// the deterministic artifact `oci import` would have persisted if it had been
+// imported — or would be persisted on a future `oci import` of the same file)
+// and only the wrapped set is written to the output layout, never to the store.
 func runOCIExport(cmd *cobra.Command, args []string) error {
 	key, err := resolveStoreKey(args[0])
 	if err != nil {
@@ -580,18 +674,36 @@ func runOCIExport(cmd *cobra.Command, args []string) error {
 	}
 	defer backend.Close()
 
-	if err := requireOCIShape(key, backend); err != nil {
+	var indexBytes []byte
+	var src oci.Source
+	if isLayout, err := isOCILayout(backend, key); err != nil {
 		return err
-	}
-
-	indexReader, _, err := backend.Get(key)
-	if err != nil {
-		return err
-	}
-	defer indexReader.Close()
-	indexBytes, err := io.ReadAll(indexReader)
-	if err != nil {
-		return err
+	} else if isLayout {
+		reader, _, err := backend.Get(key)
+		if err != nil {
+			return err
+		}
+		indexBytes, err = io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil {
+			return err
+		}
+		src = storeSource{backend}
+	} else {
+		_, st, err := backend.Get(key)
+		if err != nil {
+			return err
+		}
+		head, herr := backend.Peek(storage.Digest(key), oci.SifSniffLen)
+		if herr != nil {
+			return herr
+		}
+		a, err := artifactFor(key, st.Size, head)
+		if err != nil {
+			return err
+		}
+		indexBytes = a.IndexBytes
+		src = scaffoldSource{a: a, backend: backend}
 	}
 
 	out := outputPath
@@ -605,7 +717,6 @@ func runOCIExport(cmd *cobra.Command, args []string) error {
 	}
 	defer closeSink()
 
-	src := storeSource{backend}
 	_, _, err = oci.Copy(src, sink, indexBytes)
 	if err != nil {
 		return err
@@ -636,6 +747,29 @@ func isTarPath(p string) bool {
 }
 
 // runOCILs prints a stored layout's index, manifests, and layer descriptors.
+//
+// Two input shapes are handled, mirroring `oci import`'s two input shapes:
+//
+//  1. an OCI image index (dir/tar layout, or `oci import` of the index).
+//     `oci ls <name>` or `oci ls <index-CID>` walks the index in the store,
+//     exactly as before.
+//
+//  2. a bare file (added with `oci import <file>` or `blob add <file>`). For
+//     a bare file the name (and the layer CID) point at the file's own bytes —
+//     the scaffold's index/manifest/config are a pure function of those bytes
+//     (re-derivable via `oci.NewArtifact`), so we reconstruct the index digest
+//     without touching the store. If the store actually holds that index
+//     (the bare file was persisted by an earlier `oci import`, which writes
+//     the index + manifest + `{}` config into the CAS alongside the layer)
+//     we list the tree, reading each descriptor from the store. If the store
+//     does not hold the index (a plain `blob add` of the file) we refuse to
+//     pretend one exists and tell the caller to use the index CID of an
+//     `oci import`-ed copy, or `oci export` to wrap the bare blob for output.
+//
+// This is the "oci ls reflects the store" policy agreed with the user:
+//
+//   - `oci import file` → `oci ls name` works (the scaffold is persisted).
+//   - `blob add file`   → `oci ls name` errors (the scaffold is not persisted).
 func runOCILs(cmd *cobra.Command, args []string) error {
 	key, err := resolveStoreKey(args[0])
 	if err != nil {
@@ -648,18 +782,57 @@ func runOCILs(cmd *cobra.Command, args []string) error {
 	}
 	defer backend.Close()
 
-	if err := requireOCIShape(key, backend); err != nil {
+	var indexBytes []byte
+	if isLayout, err := isOCILayout(backend, key); err != nil {
 		return err
-	}
-
-	indexReader, _, err := backend.Get(key)
-	if err != nil {
-		return err
-	}
-	defer indexReader.Close()
-	indexBytes, err := io.ReadAll(indexReader)
-	if err != nil {
-		return err
+	} else if isLayout {
+		reader, _, err := backend.Get(key)
+		if err != nil {
+			return err
+		}
+		indexBytes, err = io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil {
+			return err
+		}
+	} else {
+		// Not an image index in the store. Is it the layer of a persisted
+		// bare-file artifact (a `oci import <file>` of the same bytes)?
+		// Reconstruct the canonical scaffold and check the store for its
+		// index — that is the exact discriminator the import path leaves in
+		// the CAS.
+		_, st, err := backend.Get(key)
+		if err != nil {
+			return err
+		}
+		head, err := backend.Peek(storage.Digest(key), oci.SifSniffLen)
+		if err != nil {
+			return err
+		}
+		a, err := artifactFor(key, st.Size, head)
+		if err != nil {
+			return err
+		}
+		id, err := identity.FromOCI(a.IndexDigest)
+		if err != nil {
+			return err
+		}
+		have, err := backend.Has(id)
+		if err != nil {
+			return err
+		}
+		if !have {
+			return fmt.Errorf("%q: not an OCI layout in the store (a bare blob — it may have been added with `blob add`; `oci ls` needs the OCI index CID of an `oci import`-ed copy, or `oci export` would wrap it for output)", args[0])
+		}
+		reader, _, err := backend.Get(id)
+		if err != nil {
+			return err
+		}
+		indexBytes, err = io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil {
+			return err
+		}
 	}
 
 	idx, err := oci.ParseIndex(bytes.NewReader(indexBytes))
