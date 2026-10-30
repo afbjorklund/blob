@@ -28,9 +28,9 @@ of the CID, which the *user-facing* layer builds from it; the storage
 layer itself is algorithm-agnostic.
 
 In the current implementation the multihash wraps a `crypto/sha256`
-digest with the `multihash.SHA2_256` code (`main.go`'s `computeHash`,
+digest with the `multihash.SHA2_256` code (`main.go`'s `cidFromReader`,
 built in `identity/`). If a different algorithm were ever used,
-`computeHash` would produce that algorithm's multihash bytes directly
+`cidFromReader` would produce that algorithm's multihash bytes directly
 (no schema change in `storage/`).
 
 **The key is carried, not verified, and has one facade between

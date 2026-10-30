@@ -89,6 +89,7 @@ blob --help
 
 ```bash
 blob sum <file>...             # print one line per file:  <cid>  <file>    (hash is an alias)
+blob sum -                     # print the CID of stdin:   cat file | blob sum -
 blob sum -c <list> [<list>...] # verify the lines of a checksum list against local files
 blob sum -c -i <list>          # -i/--ignore-missing: skip files that are not present
 ```
@@ -98,7 +99,11 @@ blob sum -c -i <list>          # -i/--ignore-missing: skip files that are not pr
 convenience so you don't need a shell wrapper to turn files into addresses
 (same family as `lookup` and `ipfs add --only-hash`). Files are hashed
 independently: an unreadable file reports its own `Error:` line and a
-non-zero exit, but the other files still produce their lines.
+non-zero exit, but the other files still produce their lines. An argument of
+`-` reads stdin, like `sha256sum -`: `cat file | blob sum -` — computed in a
+single streaming pass (the codec is read off the first byte as it flows into
+the hash), so it is not limited by the size of the input and needs no
+temporary file.
 
 **Verify.** `blob sum -c <list>` reads one or more checksum lists whose lines
 are `<cid>  <file>` (exactly the shape of `blob sum` output) and, for each

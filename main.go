@@ -242,6 +242,10 @@ func main() {
 		Long: `Compute and print the CID of each given file, one per line (like sha256sum):
   <CID>  <file>
 
+An argument of '-' reads stdin (pipe the bytes in, as cat file | blob hash -).
+The CID is computed in a single streaming pass, so stdin works and is not
+limited by the size of the input.
+
 With -c/--check the argument is instead a checksum list (one <CID>  <file> per
 line, as produced by sum) and each line is verified against the local file
 named on it, reporting one line per entry (<file>: OK, <file>: FAILED, or
@@ -340,36 +344,27 @@ lines.`,
 	}
 }
 
-// computeHash returns the Identity (multihash bytes) of a file, computed by
-// streaming (content -> key). The OCI path uses identity.FromOCI instead,
-// bridging from an existing OCI digest.
-func computeHash(filePath string) (identity.Identity, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	return identity.HashReader(file)
+// firstByte is an io.Reader wrapper that passes its stream through unchanged
+// while remembering the first byte it delivers (saw is false for an empty
+// stream). It lets the codec peek and the hash share a single forward read —
+// the only form that works for a pipe or stdin, which cannot be re-opened or
+// rewound.
+type firstByte struct {
+	r     io.Reader
+	first byte
+	saw   bool
 }
 
-// detectCodec derives the codec a file would be stored under by peeking its
-// first byte (the content-based rule, see cid.CodecForFirstByte).
-func detectCodec(filePath string) (cid.Code, error) {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return 0, err
+func (f *firstByte) Read(p []byte) (int, error) {
+	if f.saw || len(p) == 0 {
+		return f.r.Read(p)
 	}
-	defer f.Close()
-
-	buf := make([]byte, 1)
-	n, err := f.Read(buf)
-	if err != nil && err != io.EOF {
-		return 0, err
+	n, err := f.r.Read(p)
+	if n > 0 {
+		f.first = p[0]
+		f.saw = true
 	}
-	if n == 0 {
-		return cid.CodeRaw, nil
-	}
-	return cid.CodecForFirstByte(buf[0]), nil
+	return n, err
 }
 
 // peekFirstByte returns the blob's first byte (0 when empty) without
@@ -490,22 +485,35 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// cidForFile computes (but does not store) the file's CID: peek the first byte
-// for the codec (cidForFile's content-based rule), hash the rest, compose the
-// CID. It is the pure content→CID half shared by hash (hash many files),
-// hash -c (verify a checksum list against local files), and add's --only-hash.
+// cidForFile computes (but does not store) the file's CID. It is the pure
+// content→CID half shared by hash (hash many files), hash -c (verify a checksum
+// list against local files), and add's --only-hash. It delegates to
+// cidFromReader so a real file and a stream (stdin via -) take the same path.
 func cidForFile(filePath string) (cid.Cid, error) {
-	mc, err := detectCodec(filePath)
+	f, err := os.Open(filePath)
 	if err != nil {
 		return cid.Cid{}, err
 	}
+	defer f.Close()
+	return cidFromReader(f)
+}
 
-	mh, err := computeHash(filePath)
+// cidFromReader computes the CID of a stream in a single forward pass: byte 0
+// is captured for the codec (content-based rule) while the same bytes are
+// hashed — no re-open, no rewind, no buffering of the rest. This is the only
+// form that works for a pipe or stdin, where the first byte read is the only
+// first byte.
+func cidFromReader(r io.Reader) (cid.Cid, error) {
+	t := &firstByte{r: r}
+	mh, err := identity.HashReader(t)
 	if err != nil {
 		return cid.Cid{}, err
 	}
-
-	return cid.Build(mc, mh), nil
+	var first byte
+	if t.saw {
+		first = t.first
+	}
+	return cid.Build(cid.CodecForFirstByte(first), mh), nil
 }
 
 func runHash(cmd *cobra.Command, args []string) error {
@@ -513,10 +521,17 @@ func runHash(cmd *cobra.Command, args []string) error {
 		return runHashCheck(args)
 	}
 
-	// hash: one line per file, <CID>  <file>, like sha256sum.
+	// hash: one line per input, <CID>  <name>. '-' reads stdin (a single,
+	// unbounded streaming pass — see cidFromReader).
 	failed := false
 	for _, filePath := range args {
-		c, err := cidForFile(filePath)
+		var c cid.Cid
+		var err error
+		if filePath == "-" {
+			c, err = cidFromReader(os.Stdin)
+		} else {
+			c, err = cidForFile(filePath)
+		}
 		if err != nil {
 			failed = true
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -531,7 +546,7 @@ func runHash(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s  %s\n", cidStr, filePath)
 	}
 	if failed {
-		return fmt.Errorf("at least one file could not be hashed")
+		return fmt.Errorf("at least one input could not be hashed")
 	}
 	return nil
 }
