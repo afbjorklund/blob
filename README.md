@@ -94,8 +94,9 @@ blob sum -c <list> [<list>...] # verify the lines of a checksum list against loc
 blob sum -c -i <list>          # -i/--ignore-missing: skip files that are not present
 ```
 
-**Compute.** `blob sum <file>...` (alias `hash`) prints each file's CID `sha256sum`-style —
-`<cid>  <file>` (two spaces), one line per file — without storing anything. A
+**Compute.** `blob sum <file>...` (alias `hash`) prints each file's CID
+`sha256sum`-style — `<cid>  <file>` (two spaces), one line per file — without
+storing anything. A
 convenience so you don't need a shell wrapper to turn files into addresses
 (same family as `lookup` and `ipfs add --only-hash`). Files are hashed
 independently: an unreadable file reports its own `Error:` line and a
@@ -343,98 +344,13 @@ read/interop commands:
   layout only**. A `blob add`-ed file therefore exports to a valid OCI artifact
   even though nothing OCI-shaped was ever stored for it.
 
-**What names what.** The **CID is this store's own name for the content** —
-the stable, non-brittle identity, and even the default file name a `get`
-writes. A *blob*, being a file, has a natural basename, so it is intuitive
-that `oci import` also records the bare file under that basename, the same
-way `add` does: you address the **blob** the way it was added. The *OCI
-registry* name is a separate thing — an image (or an OCI artifact) has no
-natural file name of its own (registries use tags, `registry@digest`, `title`
-annotations, and so on), and we import **indirectly** through the registry:
-we trust the user to `docker pull` and `docker save`, so the file handed to
-`oci import` carries *their* chosen name, not the registry's. That is why the
-blob's basename is the safe default, and why the registry-style name is
-something the user supplies with `--name` (or simply omits and uses the CID).
-
-This is fine for bare files (they are blobs, and blobs have basenames). The
-one rough edge to revisit when OCI-*artifact* import lands is that an image
-and an artifact can share a basename yet mean different things — at that
-point we may stop recording the basename by default, or simply lean on the
-CID for unambiguous addressing.
-
-**`--name` and foreign digests.** A *name* in the store's index is a plain
-string, and nothing requires it to be the store's CID. `add` and
-`oci import` both accept a **foreign digest or reference** — an IPFS CID
-from `ipfs add` (the default `ipfs add` shape is a `dag-pb` CID over the
-content, or a raw-leaf piece CID), or an OCI registry reference like
-`docker.io/library/busybox@sha256:…` — and record it as a plain *name*
-(the label) for the content this store holds. The *content that foreign
-digest names* (an IPFS piece, a registry manifest) is **not** stored
-here: the store's invariant that a digest identifies a blob *in this CAS*
-is preserved by treating the foreign string as just a label the user
-chose, not as a digest we would resolve and pull.
-
-The two foreign spellings are **separable up-front, without content
-inspection**: an IPFS CID carries the `dag-pb` (or raw) codec,
-which the store does not hold (our store's CIDs are JSON or Raw,
-and their contents are always the same as the store's CAS), and
-an OCI reference is either `registry[:tag]@sha256:…` (which is not a
-CID at all — a scheme-qualified string) or a bare `sha256:…` (which
-parses as the store's own digest form). The shape rules already
-keep the namespaces apart; the name-index table (`index/<name>` in
-the dir backend, a `names` row in sql, the object in s3/http) is
-just where we file them.
-
-The one **liberty** worth knowing: a real registry's
-`registry@digest` for a *multiarch* image points to the multiarch
-index that references every platform's manifest. We never speak
-to a registry — the user does the platform filtering and saves
-one platform with `docker save` (which is what `--platform <…>`
-does at pull time). So the *same* `registry@digest` string in a
-real registry (→ the multiarch index) is a *different* identity
-in our store (→ the manifest and config of the single local
-image the user actually saved, with its own CID keyed to those
-bytes). The platform label is metadata inside the blob's config
-and manifest, not a first-class field we store: it is the
-content, and the content decides the CID. The user may re-map
-a `registry@digest` label to whichever local CID they like;
-the **CID is the non-mutable reference**, and the label remains
-a mutable alias the user is free to remap.
-
-And the two are **decoupled**: the foreign name can drift while
-our CID stays put. The user can re-chunk a file for IPFS (a
-different foreign raw CID, the *same bytes* → the same store
-CID), or move an image from one registry to another (a
-different `registry@digest`, the same content → the same store
-CID) — different foreign addresses, one and the same blob here.
-
-One caveat on what "the CID stays put" means: it is stable for
-the *algorithm* we use, SHA-2 256 today. We *could* swap in
-SHA-3 *today* — the multihash is algorithm-qualified, so the
-content re-addresses under a different but structurally
-similar CID: same layout, the algorithm code and digest length
-simply vary (pick an equal bit count, e.g. SHA3/SHAKE-256
-against SHA-2 256, and the digest — and so the CID's length —
-stays the same; another bit count, e.g. 512, gives a longer
-digest in the same shape). We are not saying we should; the
-point is only that the format already accommodates it.
-
-Because the algorithm sits *inside* the multihash, a blob
-hashed SHA-2 and the *same* blob hashed SHA-3 are two distinct,
-co-resident addresses in one space, not one identity rewritten.
-A migration would re-point the *names* (the "label" mechanism
-already used for foreign IPFS CIDs and `registry@digest`
-strings) at the new digest while the old blobs stay reachable
-by their own multihash/CID — a re-label, not a rupture. That
-is the opposite of Git's `sha1 → sha256` situation, where
-remotes, forks and submodules keyed on the old digests are
-stranded; here the multihash absorbs a rehash. The same
-mechanism extends to any *other* digest scheme a user wants
-to cross-reference — a Git OID, for example, is a 20-byte
-SHA-1 over a `<type> <length>\0<content>` header, not a
-multihash at all. It cannot be our CID; but it *can* be a
-*name* we accept alongside IPFS CIDs and `registry@digest`
-strings, and it resolves the same way those do.
+Two behaviors follow. A *name* is any string the user chose — `add` and
+`oci import` also accept a foreign digest or reference (an `ipfs add` CID,
+an `registry@digest`, even a Git OID) and file it as a plain name the store
+never resolves or pulls; the CID stays the single stable address for the
+content, and a name may drift or be remapped while it holds. See
+[CONCEPTS.md](CONCEPTS.md) "What names what" and
+[DESIGN.md](DESIGN.md) "Foreign digests as names".
 
 ### HTTP gateway
 

@@ -114,6 +114,28 @@ latest thing" workflow:
 name index if it is not a valid CID — so a name can never shadow a real
 content address.
 
+## What names what
+
+The **CID is this store's own name for the content** — the stable,
+non-brittle identity, and even the default file name a `get` writes. A
+*blob*, being a file, has a natural basename, so it is intuitive that
+`oci import` also records the bare file under that basename, the same
+way `add` does: you address the **blob** the way it was added. The
+*OCI registry* name is a separate thing — an image (or an OCI artifact)
+has no natural file name of its own (registries use tags,
+`registry@digest`, `title` annotations, and so on), and we import
+**indirectly** through the registry: we trust the user to `docker pull`
+and `docker save`, so the file handed to `oci import` carries *their*
+chosen name, not the registry's. That is why the blob's basename is the
+safe default, and why the registry-style name is something the user
+supplies with `--name` (or simply omits and uses the CID).
+
+This is fine for bare files (they are blobs, and blobs have basenames).
+The one rough edge to revisit when OCI-*artifact* import lands is that
+an image and an artifact can share a basename yet mean different
+things — at that point we may stop recording the basename by default,
+or simply lean on the CID for unambiguous addressing.
+
 ## HTTP gateway
 
 A **gateway** is the idea that HTTP tools (`curl`, browsers, scripts) can
