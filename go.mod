@@ -3,6 +3,7 @@ module blob
 go 1.26.0
 
 require (
+	bazil.org/fuse v0.0.0-20230120002735-62a210ff1fd5
 	github.com/cheggaaa/pb/v3 v3.2.1
 	github.com/ipfs/go-cid v0.6.2
 	github.com/mattn/go-isatty v0.0.24

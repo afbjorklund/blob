@@ -38,6 +38,7 @@ var (
 	hashIgnore  bool
 	listLong    bool
 	listenAddr  string
+	mountDir    string
 	lookupOci   bool
 	httpUser    string
 	httpPass    string
@@ -335,6 +336,30 @@ lines.`,
 	serveCmd.Flags().StringVarP(&listenAddr, "listen", "l", "127.0.0.1:8080", "address to listen on (host:port)")
 
 	rootCmd.AddCommand(serveCmd)
+
+	mountCmd := &cobra.Command{
+		Use:   "mount",
+		Short: "Mount the store read-only as a FUSE filesystem (name/ + blob/) and serve until SIGINT/SIGTERM",
+		Long: "Mount the store read-only as a local FUSE filesystem (Linux only), the\n" +
+			"filesystem analogue of serve: the store's two read namespaces are exposed as two\n" +
+			"directories inside the mount point (default $HOME/.blob-mount):\n" +
+			"\n" +
+			"  name/<name>   one symlink per recorded index name, linking to ../blob/<CID>\n" +
+			"                (list the index: `ls name/`)\n" +
+			"  blob/<CID>    the content as a regular file, streamed on read (addressed by CID,\n" +
+			"                not enumerable — `ls blob/` is empty)\n" +
+			"\n" +
+			"The mount is read-only (a write from the shell is refused). Like serve, it runs\n" +
+			"in the foreground for the life of the process and unmounts on SIGINT/SIGTERM.\n" +
+			"Select the backend with the usual --storage/--path flags (a read-only open, the\n" +
+			"same as serve).",
+		Args: cobra.NoArgs,
+		RunE: runMount,
+	}
+
+	mountCmd.Flags().StringVarP(&mountDir, "mount", "m", defaultMountPoint(), "mount point directory (defaults to $HOME/.blob-mount; created if absent, must be empty)")
+
+	rootCmd.AddCommand(mountCmd)
 
 	registerOCICmds(rootCmd)
 

@@ -8,7 +8,7 @@ gateway): [CONCEPTS.md](CONCEPTS.md). Why the design is the way it is:
 
 ## Package map
 
-Five thin packages sit between `storage` and the `main` package
+Six thin packages sit between `storage` and the `main` package
 (`main` is the CLI and the adapters only):
 
 | package     | knows                            | role                                                             |
@@ -19,6 +19,7 @@ Five thin packages sit between `storage` and the `main` package
 | `index/`    | `identity` + `cid`               | the name-index conventions: recordability, default name, escape  |
 | `oci/`      | go-digest + stdlib only          | the OCI layout half: types, walk, copy, layout adapters          |
 | `daemon/`   | `storage` (read-only)            | the testable serving layer: CID gateway + OCI distribution read  |
+| `mount/`    | `storage` (read-only)            | the FUSE read surface: `name/` (symlinks) + `blob/<CID>` (files) |
 
 The split is per *library each package may touch*: `storage/` never decodes
 the multihash, `oci/` never names a CID or a backend, `identity/` is the one
@@ -152,13 +153,72 @@ until a signal; the daemon never Closes a backend):
   (`daemon_test.go`) and, opt-in, over a real socket + `curl`
   (`daemon_smoke_test.go`, `BLOB_SERVE_SMOKE=1`).
 
+## mount/
+
+The FUSE read surface — the filesystem twin of `daemon/`. It takes the same
+`storage.StorageBackend` (read-only), presents the same two namespaces
+(`name` and `blob`), but encodes them as a POSIX tree instead of an HTTP mux.
+Built on `bazil.org/fuse` (pure Go; no CGO/libfuse) and `bazil.org/fuse/fs`;
+Linux-only (the kernel FUSE subsystem is a Linux feature, and `fuse.Mount`
+returns an error elsewhere).
+
+- `New(backend) → *FS`, then `Root()` (the `fs.FS` entry) or
+  `Mount(dir)`/`Serve`/`ServeContext` for the protocol loop.
+- **Two top directories** (the `fs` tree is a fixed skeleton, built in
+  `rootNode.Lookup`):
+  - `name/` lists the index (one symlink per `Names()` entry) and each
+    symlink's target is `../blob/<CID>`. The target is *relative* because
+    `name/` and `blob/` are siblings under the mount root, so `..` stays
+    inside the mount regardless of where it is mounted. The CID is derived
+    exactly like `daemon` derives it for `/name/<name>` (one `Peek` for the
+    first byte → `cid.CodecForFirstByte` → `cid.Render`). The `name` entry
+    is therefore a FUSE symlink — the filesystem form of the daemon's
+    `/name` `302`.
+  - `blob/` is *not listable*: it has no `ReadDirAll`; `Lookup(<CID>)`
+    returns a `blobFile` that streams on read. This is deliberate and
+    mirrors `daemon` (the `/v2/blob/<CID>` surface also addresses by
+    CID without listing) and the `storage` interface (`Names()` is the
+    index, not the CAS; there is no "list all blobs" method).
+- **Streaming, forward-only, page-bounded reads.** `blobFile.Open` does a
+  single `backend.Get` and hands the `io.ReadCloser` to a `blobHandle`,
+  which serves each kernel `Read` (page-sized) by reading that page off the
+  current position of that shared forward reader. The whole blob is never
+  buffered: `resp.Data` is `min(page, remaining)` at a time, and
+  `io.ReadFull` only pulls up to that — a GB blob costs the kernel a
+  page-by-page pull, exactly like `daemon.serveBlob`'s `io.Copy` loop.
+  The `blobFile.Attr` (used for `fstat`) peeks and closes a separate
+  reader, so `stat` never leaves a reader open.
+- **Handle lifetime (the subtle part).** FUSE sends a `Flush` on each
+  `close(2)` of a fd that refers to the handle, and **`Release` on last
+  fd close**. A handle can therefore have several fds per open; only
+  `Release` means "open over." We release the backend reader (returning
+  the pooled sql connection / dropping the remote transfer) on
+  **`Release`**, not `Flush`. `Flush` is a no-op. `Read` and the two
+  handle ops are serialized by a mutex and a `closed` flag so a post-
+  `Release` in-flight `Read` returns `EIO` (not a nil deref).
+- **Writes are refused end-to-end.** The mount is opened with the FUSE
+  `ReadOnly()` option (kernel-side `ro`), and — like `daemon` — the
+  backend is opened `storage.ReadOnly`, so *both* layers refuse
+  `Put`/`Index`/writes even if the mount flag were dropped.
+- **Testing.** `mount_test.go` exercises the tree and handle against an
+  in-memory `storage.StorageBackend` (same pattern as `daemon/`): the
+  root skeleton, the `name/` symlink targets (asserted against an
+  independent CID derivation), and the `blob/` streaming read (assembled
+  pages must be byte-identical); plus the `Release`-as-teardown contract
+  (a spurious `Read` after `Release` is `EIO`, and a `Read` after a
+  `Flush` is still served — i.e. `dd` works, not just `cat`).
+  `mount_smoke_test.go` (`BLOB_MOUNT_SMOKE=1`, needs `/dev/fuse` and the
+  `fusermount3` setuid helper) runs the same thing over a real dir
+  backend and real FUSE connection, probing with `ls` / `stat` / `cat` /
+  `touch`, which is the shell-side view a user would exercise.
+
 ## Storage internals (per backend)
 
 BACKEND.md describes the *contract*. The Go-side mechanics:
 
 - **Modes.** Backends open in an explicit `Mode`
   (`storage.ReadOnly` / `storage.ReadWrite`) via `NewStorage`: `add` opens
-  ReadWrite, `get`/`lookup`/`serve` open ReadOnly. A ReadOnly backend
+  ReadWrite, `get`/`lookup`/`serve`/`mount` open ReadOnly. A ReadOnly backend
   refuses `Put`/`Index` with `storage.ErrReadOnly` and neither creates the
   store nor touches it. `Get` streams and returns `(io.ReadCloser, Stat,
   err)` — `Stat` carries the size, the store's last-modified time in Unix
@@ -182,9 +242,10 @@ BACKEND.md describes the *contract*. The Go-side mechanics:
 - **`Close()`.** sql closes the pool (interrupting in-flight reads — the
   reader's `reader.Close()` runs first, per the defer order); http drops the
   client's idle keep-alive connections; dir and s3 are no-ops (minio-go owns
-  its own client). `main` calls `defer backend.Close()` in `runAdd`,
-  `runGet`, `runLookup`, and `main_serve.go`'s `runServe` (once, after the
-  server shut down).
+   its own client). `main` calls `defer backend.Close()` in `runAdd`,
+   `runGet`, `runLookup`, `main_serve.go`'s `runServe` (once, after the
+   server shut down), and `main_mount.go`'s `runMount` (once, after the
+   FUSE connection is torn down).
 - **Dir fanout.** The hex key bytes are carved into 1-byte dir levels —
   `fanoutDepth = 3` — the rest as filename (`<b0>/<b1>/<b2>/<rest>`):
   encoding-agnostic, ≤256 per level, no knowledge of the hash algorithm.
@@ -206,15 +267,18 @@ The gates, cheapest first:
 
 ## Testing
 
-- `identity/`, `cid/`, `index/`, `oci/`, `daemon/` — table-driven tests
-  against in-memory fakes (`identity_test.go`, `cid_test.go`,
-  `index_test.go`, `oci_test.go`, `daemon_test.go`), plain `go test`.
+- `identity/`, `cid/`, `index/`, `oci/`, `daemon/`, `mount/` — table-driven
+  tests against in-memory fakes (`identity_test.go`, `cid_test.go`,
+  `index_test.go`, `oci_test.go`, `daemon_test.go`, `mount_test.go`), plain
+  `go test`.
 - `storage/` — round-trip tests against in-memory `httptest` servers plus a
   `-race` concurrent-read concurrency guard.
 - **Smoke tests** (opt-in via env var, so `go test ./...` stays green in a
   sandbox): `TestDirSmoke` (`BLOB_DIR_PATH`), `TestHTTPSmoke`
   (`BLOB_HTTP_PATH`), `TestS3Smoke` (`BLOB_S3_ENDPOINT`/`BLOB_S3_BUCKET`),
-  and `TestServeSmoke` (`BLOB_SERVE_SMOKE=1`, needs `curl` on PATH) — the
-  whole read surface over a real socket. Run one:
+  `TestServeSmoke` (`BLOB_SERVE_SMOKE=1`, needs `curl` on PATH) — the whole
+  read surface over a real socket — and `TestMountSmoke`
+  (`BLOB_MOUNT_SMOKE=1`, needs `/dev/fuse` and the `fusermount3` setuid
+  helper) — the store over a real FUSE connection. Run one:
   `BLOB_DIR_PATH=/mnt/nfs go test -v -run TestDirSmoke ./storage`.
 - `main` has no tests by convention (it is the CLI / adapters).

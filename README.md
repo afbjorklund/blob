@@ -47,6 +47,11 @@ blob --help
   materializing the entire blob in memory. The `sqlite` backend reads via
   SQLite's blob API (`db.OpenBlob` in a read-only handle) instead of loading the
   whole row
+- **FUSE mount** - A built-in `blob mount` command (Linux; like `ipfs mount`)
+  exposes the store read-only as a local filesystem: the recorded index names
+  appear under `name/` as symlinks to their blob's CID, and the content is
+  readable as regular files under `blob/<CID>` (streamed, never buffered
+  whole). It uses `bazil.org/fuse` (pure Go — no CGO) and is read-only
 - **Read-only HTTP gateway** - A built-in `blob serve` command (like the IPFS
   HTTP gateway, but for this local store) serves `GET /blob/<CID>`, so a stable
   `blob://<CID>` scheme can be mapped to `http://<host>/blob/<CID>` without the
@@ -450,6 +455,53 @@ podman pull docker://127.0.0.1:8080/name/busybox:latest     # secondary (name)
 
 # or, without an OCI client:
 curl http://127.0.0.1:8080/v2/blob/$CID/manifests/latest
+```
+
+### FUSE mount (read-only filesystem view)
+
+```bash
+blob mount [--mount/-m <dir>]
+```
+
+Mounts the store read-only as a local FUSE filesystem (Linux only; pure Go via
+`bazil.org/fuse`, so no CGO or libfuse install), the filesystem analogue of
+`serve` — like `ipfs mount`. It runs in the foreground for the life of the
+process and unmounts on `SIGINT`/`SIGTERM`. The mount point defaults to
+`$HOME/.blob-mount` (or `BLOB_MOUNT_PATH`); pass `--mount`/`-m` for another —
+a `~` or `~/...` is expanded to the real home path.
+
+The backend is chosen by the usual `--storage`/`--path` flags (a *read-only*
+open, the same as `serve`), so `name/` and `blob/` present whichever backends
+you point at:
+
+```
+name/<name>   one symlink per recorded index name, linking to the blob's CID
+blob/<CID>    the content as a regular file, streamed on read
+```
+
+- `name/` **is listable** — it is the store's index (the `blob list` set).
+  `ls name/` shows the names; `name/<n>` is a POSIX symlink to `../blob/<CID>`,
+  so `name/<n>` and `blob/<CID>` are the same "name → canonical blob" pointer,
+  rendered as a link instead of the gateway's `302`. The target is a relative
+  `../blob/<CID>`, so it resolves correctly no matter where the mount lives.
+- `blob/` is **addressable by CID, not enumerable**: `blob/<CID>` opens and
+  `cat`s/`stat`s normally, but `ls blob/` is empty — the store exposes no
+  "list all blobs" (the index, not the CAS, is what `Names()` covers), so the
+  directory is read by path only. This is the same property as the OCI
+  surface, which addresses inner blobs by digest and never lists them.
+- Reads are **streaming and bounded** (the kernel page cache serves re-reads);
+  a multi-GB blob is served page-by-page, never buffered whole in the mount.
+- It is **read-only** end to end: the mount is opened `ro` and the backend is
+  opened read-only, so a write from the shell (`touch`, `rm`, `cp` into the
+  mount) is refused.
+
+```console
+$ blob mount                        # mounts at $HOME/.blob-mount
+$ ls $HOME/.blob-mount/name/
+busybox  busybox.sif  ubuntu_latest.sif  …
+$ cat $HOME/.blob-mount/name/busybox    # follows the link: same bytes as blob get
+$ stat -c '%s' $HOME/.blob-mount/blob/v060084h…   # size, no download
+$ ls $HOME/.blob-mount/blob/                 # empty — the CAS is not listable
 ```
 
 ### Name index
