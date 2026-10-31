@@ -94,7 +94,11 @@ own data (no CID decoding step).
   so reading the entry directly yields the content
   (`cat .blob-store/index/<name>` works). SQL backend: a `names
   (name, hash)` table where `hash REFERENCES blobs(hash)` — a real
-  foreign key, since the index value is a blob key.
+  foreign key, since the index value is a blob key. HTTP/S3 backends
+  file the same link as a single object, `index/<name>` whose body is
+  the hex multihash — the server-side counterpart of the dir symlink
+  and the sql foreign key (the on-wire shape is in
+  [BACKEND.md](BACKEND.md)).
 - `get` parses a CID to its multihash first, and only falls back to
   the name index when the argument is not a CID, so a CID is never
   shadowed by a name.

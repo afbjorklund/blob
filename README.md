@@ -519,38 +519,31 @@ test
 
 ### HTTP backend
 
-Point `--path` at a remote server and the store (blobs and name index) lives
-there — `add` issues `PUT`, `get`/`lookup` issue `GET` (and `HEAD` for the
-existence check the CLI uses before storing). Blobs are addressed by the hex of
-the multihash, the name index lives at `index/<name>` (the body is the hex
-multihash — the server-side counterpart of the dir backend's symlink / sql
-foreign key). `blob list` needs the server to serve `GET <base>/index/` as a
-JSON autoindex (see [BACKEND.md](BACKEND.md) for the nginx config):
+Point `--path` at a remote server that stores the blobs — typically one an
+operator has already provisioned. This client does nothing but send
+`PUT`/`GET`/`HEAD`; nothing is created on the server. Credentials via
+`--user`/`--pass` (or `BLOB_USER`/`BLOB_PASS`):
 
 ```console
-# server on http://localhost:8080 storing blobs at /<hex> and names at /index/<name>
-# (on port 80 you would drop the :8080, e.g. http://localhost/blob)
 $ blob --storage http --path http://localhost:8080 add test.txt
 Added: v05ah487ip8drdhv90v86rbv4d1v5f7ueeqpnsjkjmtg508mqabjcpgjfq8
-
-$ blob --storage http --path http://localhost:8080 get v05ah487ip8drdhv90v86rbv4d1v5f7ueeqpnsjkjmtg508mqabjcpgjfq8 -o output.txt
-Retrieved: v05ah487ip8drdhv90v86rbv4d1v5f7ueeqpnsjkjmtg508mqabjcpgjfq8 -> output.txt
 
 $ blob --storage http --path http://localhost:8080 get test.txt -o output.txt
 Retrieved: test.txt -> output.txt
 ```
 
-This is a *storage* backend (the client talks hash-based over GET/PUT); it is
-distinct from `blob serve`, which is the read-only user-facing CID gateway (`/blob/<CID>`,
-`/name/<name>`).
+A *storage* backend (the client talks content-addressed over `GET`/`PUT`),
+distinct from `blob serve` — the read-only user-facing CID gateway. Where the
+server must serve (blob + `index/` paths, and the JSON autoindex `list` needs)
+and a complete nginx setup: [BACKEND.md](BACKEND.md).
 
 ### S3 backend (Ceph RGW)
 
 Point `--path` at an S3-compatible endpoint (Ceph RADOS Gateway is the primary
-target) and `--bucket` at a named store within it. The client issues S3 `PUT`/`GET`/`HEAD`
-— blobs at `<bucket>/<hex>` and the name index at `<bucket>/index/<name>` (body
-the hex multihash, the same last-add-wins link as the other backends). `--user`/`--pass`
-(or `BLOB_USER`/`BLOB_PASS`) carry the access key / secret key:
+target; MinIO and AWS S3 work too) and `--bucket` at a store within it. As
+with the other backends this client provisions nothing — point it at a bucket
+an operator has already created. Credentials via `--user`/`--pass` (or
+`BLOB_USER`/`BLOB_PASS`, the access/secret key):
 
 ```console
 # Ceph RGW at 127.0.0.1:7480 (the default RGW S3 port), bucket `blobstore`
@@ -561,9 +554,8 @@ $ blob --storage s3 --path 127.0.0.1:7480 --bucket blobstore get test.txt -o out
 Retrieved: test.txt -> output.txt
 ```
 
-This is a *storage* backend (the client talks hash-based over the S3 object
-API); it is distinct from `blob serve`, which is the read-only user-facing CID
-gateway.
+A *storage* backend (the client talks content-addressed over the S3 object
+API), distinct from `blob serve` — the read-only user-facing CID gateway.
 
 For server-side setup (nginx for the `http` backend, Ceph RGW via cephadm for
 the `s3` backend) and the opt-in smoke tests, see [BACKEND.md](BACKEND.md).
