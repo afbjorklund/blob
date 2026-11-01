@@ -327,10 +327,11 @@ lines.`,
 	rootCmd.AddCommand(listCmd)
 
 	serveCmd := &cobra.Command{
-		Use:   "serve",
-		Short: "Serve the blob store over HTTP (read-only gateway)",
-		Args:  cobra.NoArgs,
-		RunE:  runServe,
+		Use:     "serve",
+		Aliases: []string{"daemon"},
+		Short:   "Serve the blob store over HTTP (read-only gateway)",
+		Args:    cobra.NoArgs,
+		RunE:    runServe,
 	}
 
 	serveCmd.Flags().StringVarP(&listenAddr, "listen", "l", "127.0.0.1:8080", "address to listen on (host:port)")
