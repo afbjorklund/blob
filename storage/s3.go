@@ -169,6 +169,31 @@ func (s *S3Storage) Get(hash Digest) (io.ReadCloser, Stat, error) {
 	return obj, Stat{Size: stat.Size, Mtime: mtime}, nil
 }
 
+func (s *S3Storage) Stat(hash Digest) (Stat, error) {
+	// StatObject is the metadata-only call (Has uses it the same way to ask
+	// "does it exist?"); unlike Get, it opens no object and therefore no open
+	// transfer to have to discard. LastModified absent means unknown (0),
+	// never fabricated.
+	ctx, cancel := context.WithTimeout(context.Background(), s3PutTimeout)
+	defer cancel()
+
+	stat, err := s.client.StatObject(ctx, s.bucket, s.blobKey(hash), minio.StatObjectOptions{})
+	if err != nil {
+		if isNoSuchKey(err) {
+			return Stat{}, errors.New("blob not found")
+		}
+		return Stat{}, err
+	}
+
+	var mtime int64
+	if !stat.LastModified.IsZero() {
+		mtime = stat.LastModified.Unix()
+	}
+
+	// The blob lives at a remote object key, not a local file, so Path is empty.
+	return Stat{Size: stat.Size, Mtime: mtime}, nil
+}
+
 func (s *S3Storage) Has(hash Digest) (bool, error) {
 	_, err := s.client.StatObject(context.Background(), s.bucket, s.blobKey(hash), minio.StatObjectOptions{})
 	if err != nil {

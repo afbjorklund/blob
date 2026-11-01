@@ -186,8 +186,8 @@ returns an error elsewhere).
   buffered: `resp.Data` is `min(page, remaining)` at a time, and
   `io.ReadFull` only pulls up to that — a GB blob costs the kernel a
   page-by-page pull, exactly like `daemon.serveBlob`'s `io.Copy` loop.
-  The `blobFile.Attr` (used for `fstat`) peeks and closes a separate
-  reader, so `stat` never leaves a reader open.
+   The `blobFile.Attr` (used for `fstat`) calls `backend.Stat` (metadata only,
+   no reader opened or left open), so `stat` costs one metadata round trip.
 - **Handle lifetime (the subtle part).** FUSE sends a `Flush` on each
   `close(2)` of a fd that refers to the handle, and **`Release` on last
   fd close**. A handle can therefore have several fds per open; only
@@ -220,12 +220,18 @@ BACKEND.md describes the *contract*. The Go-side mechanics:
   (`storage.ReadOnly` / `storage.ReadWrite`) via `NewStorage`: `add` opens
   ReadWrite, `get`/`lookup`/`serve`/`mount` open ReadOnly. A ReadOnly backend
   refuses `Put`/`Index` with `storage.ErrReadOnly` and neither creates the
-  store nor touches it. `Get` streams and returns `(io.ReadCloser, Stat,
-  err)` — `Stat` carries the size, the store's last-modified time in Unix
-  seconds (0 when the backend does not track one), and the local filesystem
-  path (dir only; empty on sql/s3/http — the blob is a row / object / remote
-  body, not a local file). `get --only-size` / `--only-mtime` / `--only-path`
-  project those three fields without fetching the bytes.
+   store nor touches it. `Get` streams and returns `(io.ReadCloser, Stat,
+   err)` — `Stat` carries the size, the store's last-modified time in Unix
+   seconds (0 when the backend does not track one), and the local filesystem
+   path (dir only; empty on sql/s3/http — the blob is a row / object / remote
+   body, not a local file). A caller that wants the probe fields but not the
+   content uses `Stat(hash) (Stat, error)` instead: no reader is opened or
+   discarded (dir: `os.Stat` with no fd; sql: the metadata SELECT, no blob
+   opened; http: `HEAD`, no body; s3: `StatObject`), which is strictly cheaper
+   than `Get` + `Close`. `get --only-size` / `--only-mtime` / `--only-path`,
+   the mount's `fstat`, `ls`, and the OCI export/list scaffold all take the
+   `Stat` path; streaming consumers (`get`'s download, `serve`, `cat`,
+   `oci` Copy) keep `Get`.
 - **Concurrency, per backend.** `sql` is a `zombiezen.com/go/sqlite/sqlitex`
   **`Pool`** (size 10), not one `*sqlite.Conn` (a single C handle, not safe
   concurrently): each op checks a conn out and back; `Get`'s reader keeps

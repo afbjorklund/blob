@@ -105,6 +105,10 @@ func TestHTTPSmoke(t *testing.T) {
 		if ok, err := w.Has(key); err != nil || !ok {
 			t.Fatalf("Has(%q) = %v, %v; want true, nil", key, ok, err)
 		}
+		// Stat (metadata-only) confirms the size without opening a reader.
+		if st, serr := ro.Stat(key); serr != nil || st.Size <= 0 {
+			t.Fatalf("Stat(%q) = %+v, %v; want size > 0", key, st, serr)
+		}
 		got, err := readBlob(ro, key)
 		if err != nil {
 			t.Fatalf("Get(%q): %v", key, err)

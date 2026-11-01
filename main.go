@@ -759,29 +759,32 @@ func runGet(cmd *cobra.Command, args []string) error {
 	}
 	defer backend.Close()
 
+	// The probe flags need only metadata, so take the Stat path (no reader is
+	// opened / discarded) and return before the content would be fetched at all.
+	if onlySize || onlyMtime || onlyPath {
+		stat, err := backend.Stat(digest)
+		if err != nil {
+			return err
+		}
+		switch {
+		case onlySize:
+			fmt.Println(stat.Size)
+		case onlyMtime:
+			fmt.Println(stat.Mtime)
+		case onlyPath:
+			if stat.Path == "" {
+				return errors.New("--only-path is only supported by the dir backend (the blob is not a local file there); use `blob get` to materialize a local file first")
+			}
+			fmt.Println(stat.Path)
+		}
+		return nil
+	}
+
 	reader, stat, err := backend.Get(digest)
 	if err != nil {
 		return err
 	}
 	defer reader.Close()
-
-	if onlySize {
-		fmt.Println(stat.Size)
-		return nil
-	}
-
-	if onlyMtime {
-		fmt.Println(stat.Mtime)
-		return nil
-	}
-
-	if onlyPath {
-		if stat.Path == "" {
-			return errors.New("--only-path is only supported by the dir backend (the blob is not a local file there); use `blob get` to materialize a local file first")
-		}
-		fmt.Println(stat.Path)
-		return nil
-	}
 
 	// Never clobber an existing output unless --force: the check runs
 	// before the download starts, so a refused get costs nothing.
@@ -969,9 +972,8 @@ func runList(cmd *cobra.Command, args []string) error {
 					info.cid = r
 				}
 			}
-			if reader, st, gerr := backend.Get(key); gerr == nil {
+			if st, gerr := backend.Stat(key); gerr == nil {
 				info.size = st.Size
-				_ = reader.Close()
 			} else {
 				info.size = -1
 			}

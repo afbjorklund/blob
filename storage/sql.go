@@ -244,6 +244,43 @@ func (s *SQLStorage) Get(hash Digest) (io.ReadCloser, Stat, error) {
 	return &connReader{blob: blob, conn: conn, put: s.put}, Stat{Size: size, Mtime: mtime}, nil
 }
 
+func (s *SQLStorage) Stat(hash Digest) (Stat, error) {
+	conn, err := s.take(context.Background())
+	if err != nil {
+		return Stat{}, err
+	}
+	defer s.put(conn)
+
+	var (
+		size  int64
+		mtime int64
+		found bool
+	)
+	qerr := sqlitex.ExecuteTransient(
+		conn,
+		"SELECT length(data), mtime FROM blobs WHERE hash = ?",
+		&sqlitex.ExecOptions{
+			Args: []any{hash},
+			ResultFunc: func(stmt *sqlite.Stmt) error {
+				found = true
+				size = stmt.ColumnInt64(0)
+				mtime = stmt.ColumnInt64(1)
+				return nil
+			},
+		},
+	)
+	if qerr != nil {
+		return Stat{}, qerr
+	}
+	if !found {
+		return Stat{}, errors.New("blob not found")
+	}
+	// The blob is a row in a database file, not a file of its own, so Path is
+	// empty. No blob is opened (that is Get's job), so the connection is
+	// simply returned to the pool.
+	return Stat{Size: size, Mtime: mtime}, nil
+}
+
 func (s *SQLStorage) Has(hash Digest) (bool, error) {
 	conn, err := s.take(context.Background())
 	if err != nil {

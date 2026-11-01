@@ -439,6 +439,25 @@ func TestRoundTrip(t *testing.T) { //nolint:gocyclo
 				}
 			}
 
+			// Stat is the metadata-only path: same size (and tracked mtime) as
+			// Get reports, but no reader to open or close.
+			for _, e := range entries {
+				st, err := w.Stat(e.key)
+				if err != nil {
+					t.Fatalf("Stat(%q): %v", e.key, err)
+				}
+				if st.Size != int64(len(e.value)) {
+					t.Fatalf("Stat(%q) size = %d; want %d", e.key, st.Size, len(e.value))
+				}
+				if st.Mtime <= 0 {
+					t.Fatalf("Stat(%q) mtime = %d; want > 0 (the backend's last-modified time)", e.key, st.Mtime)
+				}
+			}
+			// A missing blob is an error (not a zero Stat), like Get.
+			if _, err := w.Stat([]byte("missing")); err == nil {
+				t.Fatal("Stat(missing) = nil error; want an error")
+			}
+
 			if err := w.Close(); err != nil {
 				t.Fatal(err)
 			}

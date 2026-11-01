@@ -76,6 +76,14 @@ func (m *mem) Get(hash storage.Digest) (io.ReadCloser, storage.Stat, error) {
 	return io.NopCloser(bytes.NewReader(b)), storage.Stat{Size: int64(len(b))}, nil
 }
 
+func (m *mem) Stat(hash storage.Digest) (storage.Stat, error) {
+	b, ok := m.blobs[string(hash)]
+	if !ok {
+		return storage.Stat{}, syscall.ENOENT
+	}
+	return storage.Stat{Size: int64(len(b))}, nil
+}
+
 func (m *mem) Has(hash storage.Digest) (bool, error) {
 	_, ok := m.blobs[string(hash)]
 	return ok, nil

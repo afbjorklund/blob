@@ -690,7 +690,7 @@ func runOCIExport(cmd *cobra.Command, args []string) error {
 		}
 		src = storeSource{backend}
 	} else {
-		_, st, err := backend.Get(key)
+		st, err := backend.Stat(key)
 		if err != nil {
 			return err
 		}
@@ -801,7 +801,7 @@ func runOCILs(cmd *cobra.Command, args []string) error {
 		// Reconstruct the canonical scaffold and check the store for its
 		// index — that is the exact discriminator the import path leaves in
 		// the CAS.
-		_, st, err := backend.Get(key)
+		st, err := backend.Stat(key)
 		if err != nil {
 			return err
 		}

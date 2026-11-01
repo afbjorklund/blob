@@ -61,6 +61,16 @@ func (m *memBackend) Get(hash storage.Digest) (io.ReadCloser, storage.Stat, erro
 	return io.NopCloser(bytes.NewReader(b)), storage.Stat{Size: int64(len(b)), Mtime: testMtime}, nil
 }
 
+func (m *memBackend) Stat(hash storage.Digest) (storage.Stat, error) {
+	m.mu.Lock()
+	b, ok := m.blobs[string(hash)]
+	m.mu.Unlock()
+	if !ok {
+		return storage.Stat{}, errors.New("not found")
+	}
+	return storage.Stat{Size: int64(len(b)), Mtime: testMtime}, nil
+}
+
 func (m *memBackend) Has(hash storage.Digest) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

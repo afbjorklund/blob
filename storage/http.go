@@ -285,6 +285,38 @@ func (s *HTTPStorage) Get(hash Digest) (io.ReadCloser, Stat, error) {
 	return resp.Body, Stat{Size: resp.ContentLength, Mtime: mtime}, nil
 }
 
+func (s *HTTPStorage) Stat(hash Digest) (Stat, error) {
+	// HEAD is the wire-level stat: it carries the same headers a GET would
+	// (Content-Length, Last-Modified) but the server does not start sending a
+	// body. A Get-then-discard would open a full GET and drop resp.Body
+	// (releasing the connection, but after the body was initiated) — HEAD
+	// never initiates the body at all, so it is strictly cheaper and is the
+	// honest way to "ask for metadata, not content".
+	req, err := http.NewRequest(http.MethodHead, s.blobURL(hash), nil)
+	if err != nil {
+		return Stat{}, err
+	}
+
+	resp, err := s.do(req, http.MethodHead, hex.EncodeToString(hash))
+	if err != nil {
+		if notFound(err) {
+			return Stat{}, errors.New("blob not found")
+		}
+		return Stat{}, err
+	}
+	defer closeBody(resp)
+
+	// mtime is the server's Last-Modified (RFC 7231), the same value Get reads;
+	// absent means unknown (0), never fabricated.
+	var mtime int64
+	if v := resp.Header.Get("Last-Modified"); v != "" {
+		if tm, perr := http.ParseTime(v); perr == nil {
+			mtime = tm.Unix()
+		}
+	}
+	return Stat{Size: resp.ContentLength, Mtime: mtime}, nil
+}
+
 func (s *HTTPStorage) Has(hash Digest) (bool, error) {
 	req, err := http.NewRequest(http.MethodHead, s.blobURL(hash), nil)
 	if err != nil {

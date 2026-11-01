@@ -96,6 +96,18 @@ type StorageBackend interface {
 	// a backend that does not track a field leaves it zero / empty rather
 	// than erroring.
 	Get(hash Digest) (io.ReadCloser, Stat, error)
+	// Stat reports a blob's metadata (the same Stat Get returns) without
+	// opening a reader. It is the light path for a caller that wants only the
+	// probe fields (size / mtime / path) and not the content: it opens no
+	// stream to be discarded, so it is strictly cheaper than Get + Close.
+	// Per backend it is: dir — an os.Stat of the in-store path (no fd opened);
+	// sql — the metadata SELECT only, no blob opened, the pooled connection
+	// is taken and returned; http — a HEAD (headers, no body) rather than the
+	// GET whose body a Get-and-close would start; s3 — a StatObject (the same
+	// call Has uses). A missing blob returns an error (not a zero Stat), the
+	// same "blob not found" distinction Get makes. The per-field zero / empty
+	// meaning is identical to Get (see Stat).
+	Stat(hash Digest) (Stat, error)
 	Has(hash Digest) (bool, error)
 	// Index records a name→hash association. On a read-only backend it
 	// always returns ErrReadOnly without touching the store.

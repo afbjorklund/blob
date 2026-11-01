@@ -77,7 +77,7 @@ On-wire layout the server must serve (blobs at `<base>/<hex>`, name index at
 ```text
 PUT  <base>/<hex>            body = blob bytes          (add)
 GET  <base>/<hex>            → blob bytes               (get)
-HEAD <base>/<hex>            → 200 / 404                 (existence check)
+HEAD <base>/<hex>            → 200 / 404                 (existence + size/mtime)
 PUT  <base>/index/<name>     body = hex multihash        (index / add name)
 GET  <base>/index/<name>     → hex multihash             (lookup)
 GET  <base>/index/           → JSON autoindex of names   (list names)
@@ -117,6 +117,12 @@ reports `0` ("unknown") rather than inventing one: the gateway then omits
 `Last-Modified`, and `--only-mtime` prints `0`. So adding the header to an
 existing server changes the observable output from "no time" to "a real
 time" — nothing else about the contract changes.
+
+The metadata-only path — `get --only-size` / `--only-mtime`, the mount's
+`fstat`, `blob ls`, and the OCI export/list size lookup that want size or
+time but not the bytes — sends that same `HEAD` (the backend's `Stat`), so a
+server that answers `HEAD` with `Content-Length` (and, for mtime,
+`Last-Modified`) needs no extra endpoint for it.
 
 ### nginx + htpasswd (Quick Start)
 
@@ -251,8 +257,8 @@ filesystem under the `dir` backend, real SigV4 signing for `s3`, etc.
 
 All three check the same contract: `Put` → `Peek` (first bytes) → name
 `Index`/`Lookup` round-trip with last-add-wins re-point → `Names` (list the
-index, not the CAS) → the read-only guard rejecting writes → `Has`/`Get` full
-read-back.
+index, not the CAS) → the read-only guard rejecting writes → `Has` → `Stat`
+(metadata without the body) → `Get` full read-back.
 
 ```bash
 BLOB_DIR_PATH=/mnt/nfs/blobstore \

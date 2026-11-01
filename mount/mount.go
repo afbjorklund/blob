@@ -287,8 +287,8 @@ func (n *blobDir) Lookup(_ context.Context, name string) (fs.Node, error) {
 }
 
 // blobFile is the regular file under blob/<CID>. Attr is a self-contained
-// size probe (Get, read Stat.Size, close — no content read, no handle left
-// open). Open creates a blobHandle that owns the streaming reader for the
+// metadata probe (a backend Stat — no content read, no handle opened at all).
+// Open creates a blobHandle that owns the streaming reader for the
 // open's lifetime.
 type blobFile struct {
 	fs  *FS
@@ -297,20 +297,17 @@ type blobFile struct {
 
 func (b *blobFile) Attr(_ context.Context, a *fuse.Attr) error {
 	a.Mode = 0o444
-	// Size probe: Get opens the blob (giving Stat.Size for the stat fields
-	// and the correct size the kernel uses to bound its reads) and is closed
-	// immediately — no content is read and no handle is left, so a `stat`
-	// costs one open + one close and nothing more (a pooled sql connection
-	// is taken and returned to the pool; a remote transfer is opened and
-	// dropped; a dir fd is opened and closed).
-	reader, stat, err := b.fs.backend.Get(b.key)
+	// Size probe: backend.Stat returns the size and mtime without opening a
+	// reader (a dir os.Stat; a sql SELECT with no blob opened; an http HEAD;
+	// an s3 StatObject) — no content read and no handle to release, so a
+	// `stat` costs exactly one metadata round trip and nothing else.
+	stat, err := b.fs.backend.Stat(b.key)
 	if err != nil {
-		// A lookup already Has()-confirmed the blob, so a Get failure here is
+		// A lookup already Has()-confirmed the blob, so a stat failure here is
 		// a genuine I/O problem, not a not-found (which would already have
 		// been ENOENT in the lookup). Surface it as-is.
 		return err
 	}
-	_ = reader.Close()
 	a.Size = uint64(stat.Size)
 	if stat.Mtime > 0 {
 		t := time.Unix(stat.Mtime, 0).UTC()

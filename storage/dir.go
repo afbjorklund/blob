@@ -108,6 +108,15 @@ func (s *DirStorage) Get(hash Digest) (io.ReadCloser, Stat, error) {
 	return f, Stat{Size: stat.Size(), Mtime: stat.ModTime().Unix(), Path: dst}, nil
 }
 
+func (s *DirStorage) Stat(hash Digest) (Stat, error) {
+	dst := filepath.Join(s.rootDir, s.relPath(hash))
+	fi, err := os.Stat(dst)
+	if err != nil {
+		return Stat{}, err
+	}
+	return Stat{Size: fi.Size(), Mtime: fi.ModTime().Unix(), Path: dst}, nil
+}
+
 func (s *DirStorage) Has(hash Digest) (bool, error) {
 	_, err := os.Stat(filepath.Join(s.rootDir, s.relPath(hash)))
 	if err == nil {

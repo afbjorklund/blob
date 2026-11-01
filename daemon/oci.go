@@ -157,7 +157,7 @@ func indexRepo(repo string, backend storage.StorageBackend, key storage.Digest, 
 // go-digest form (identity.ToOCI is the reverse of identity.FromOCI); we do
 // not re-read the layer bytes to produce it.
 func artifactRepo(repo string, backend storage.StorageBackend, key storage.Digest) (*ociRepo, error) {
-	_, st, err := backend.Get(key)
+	st, err := backend.Stat(key)
 	if err != nil {
 		return nil, err
 	}
