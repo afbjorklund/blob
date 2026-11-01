@@ -36,7 +36,11 @@ A **CID** (Content ID) is that identifier. It is the content's hash (a
 *multihash*: an algorithm code plus the digest) plus a *codec* — a tag for
 what the bytes *are* (JSON vs. raw bytes). The address is self-describing:
 from the CID alone you can tell how the content was hashed and what kind of
-thing it is, without consulting any metadata store.
+thing it is, without consulting any metadata store. This is the one place CID
+beats a plain digest: `sha256sum` prints 64 hex characters a reader must
+*assume* are SHA-256, where a line that records the full CID says the
+algorithm and the type outright, so a checksum list has no "improperly
+formatted" lines and no style to guess.
 
 In `blob`, the CID is CIDv1 rendered in **base32hex** — a 5-bits-per-character
 multibase encoding using the alphabet `0-9a-v` (whose first 16 characters,

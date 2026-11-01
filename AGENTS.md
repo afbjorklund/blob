@@ -1,10 +1,11 @@
 # AGENTS.md
 
 A content-addressable blob store (CIDv1, base32hex) with `dir`, `sql`
-(SQLite), `http` and `s3` backends, plus OCI import/export and a read-only
-HTTP gateway + OCI-distribution read surface (`blob serve`). Single Go
-module. Everything here is a **pointer** — the details live in the docs and
-the code, and where a fact is stated, the code is the authority, not any doc.
+(SQLite), `http` and `s3` backends, plus OCI import/export and read-only
+serve surfaces — an HTTP gateway + OCI-distribution read (`blob serve`) and
+a FUSE read-only mount (`blob mount`). Single Go module. Everything here is a
+**pointer** — the details live in the docs and the code, and where a fact is
+stated, the code is the authority, not any doc.
 
 | document                               | what it is                                                                                 |
 |----------------------------------------|--------------------------------------------------------------------------------------------|

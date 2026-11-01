@@ -35,58 +35,32 @@ blob --help
   store's sha2-256 multihash, so an OCI import and a plain `add` of identical
   content deduplicate for free. `oci add`/`oci get` work as aliases. No registry
   I/O — local layouts only (see [DESIGN.md](DESIGN.md))
-- **Pluggable storage backends**:
-  - Directory (`--path` dir; files sharded across up to 3 one-byte fanout
-    levels: `<byte0>/<byte1>/<byte2>/<rest of hex>`, e.g. `12/20/...`)
-  - SQLite (single database file at `--path`)
-  - HTTP (`--path` base URL; a thin GET/PUT proxy to a remote server, blobs at
-    `<base>/<hex>`)
-  - S3 (`--path` endpoint URL, `--bucket` name; primary target Ceph RADOS
-    Gateway; a thin S3-object proxy, blobs at `<bucket>/<hex>`)
-- **Streaming I/O** - Files are streamed to and from the backend without
-  materializing the entire blob in memory. The `sqlite` backend reads via
-  SQLite's blob API (`db.OpenBlob` in a read-only handle) instead of loading the
-  whole row
+- **Pluggable storage backends** - the same CAS, stored where you point
+  `--path`: Directory, SQLite (a single file), HTTP (a remote `GET`/`PUT`
+  server), and S3 (primary target Ceph RADOS Gateway). See
+  [BACKEND.md](BACKEND.md) for how to point at each one
+- **Streaming I/O** - Blobs are streamed to and from the backend without
+  materializing the whole blob in memory
 - **FUSE mount** - A built-in `blob mount` command (Linux; like `ipfs mount`)
   exposes the store read-only as a local filesystem: the recorded index names
   appear under `name/` as symlinks to their blob's CID, and the content is
   readable as regular files under `blob/<CID>` (streamed, never buffered
   whole). It uses `bazil.org/fuse` (pure Go — no CGO) and is read-only
-- **Read-only HTTP gateway** - A built-in `blob serve` command (like the IPFS
-  HTTP gateway, but for this local store) serves `GET /blob/<CID>`, so a stable
-  `blob://<CID>` scheme can be mapped to `http://<host>/blob/<CID>` without the
-  client knowing the backend or storage path. Response carries `Content-Type`
-  (from the CID codec), `Content-Length`, `Content-Digest: sha-256=…` (the
-  stored multihash digest), and `Last-Modified` (RFC 7231, the store's
-  last-modified time) so HTTP clients can use conditional requests and
-  maintenance tooling can see when a blob was added. `GET /name/<name>` resolves
-  the name and `302`-redirects to the canonical `/blob/<CID>`
+- **Read-only HTTP gateway** - `blob serve` serves the blobs over plain HTTP —
+  `GET /blob/<CID>` and `GET /name/<name>` (a `302`-redirect to the canonical
+  `/blob/<CID>`) — so a stable `blob://<CID>` maps to `http://<host>/blob/<CID>`
+  without the client knowing the backend. See Usage, HTTP gateway, for `curl`
 - **OCI distribution registry (pull)** - `blob serve` also speaks the OCI
-  distribution *read* API under `/v2/`, so an already-imported layout can be
-  pulled by stock clients (`podman pull docker://…`, `oras pull oras://…`,
-  `skopeo`, buildkit) with no `oci export` step. The repository name is the CID
-  the store already printed: `docker://host/blob/<CID>` (primary, the exact CID
-  from `oci import`) or `docker://host/name/<name>` (secondary, the name index).
-  The only tag is `latest` (→ the layout index); inner components are addressed
-  by their `sha256:<hex>` digest, exactly as the OCI spec expects. Read-only (no
-  push), no auth/HTTPS — treat the base as a trusted plain-HTTP registry
-  (localhost by default)
-- **Name index** - A separate per-name index in each backend (symlink in the dir
-  backend, foreign-keyed table in the sql backend, an `index/<name>` object
-  holding the hash in the http/s3 backends) lets you resolve a name to the exact
-  stored blob CID (e.g. `ubuntu_latest.sif` and `ubuntu_26.04.sif` both resolve
-  to the same blob). Last add wins, so `latest`-style aliases update as new
-  content is stored. `blob list` prints the recorded names (the index, not the
-  CAS)
-  - **Registry-style names** - a name may contain `/`, `@`, `:`, `.` etc. (`docker.io/library/busybox`,
-    `docker.io/library/busybox@sha256:…`). All backends keep the index one flat
-    level for it: the name is stored as an *encoded segment* (`/` → `%2F`, `%` →
-    `%%`), and the clean name is what every command takes and prints.
-    `oci import` of a layout records the basename plus any `--name`
-    (repeatable), all resolving to the layout's index CID; of a bare file the
-    same names resolve to the *file's own bytes* (the artifact's single layer,
-    the same key `blob add` uses) — the file is named consistently regardless of
-    which command stores it
+  distribution *read* API under `/v2/`, so podman / oras / skopeo can pull an
+  imported layout with no `oci export` step; read-only, pull by CID or name,
+  tag `latest`. See Usage, OCI distribution pull
+- **Name index** - a separate per-name index, so a readable name resolves to
+  the exact stored blob CID (`ubuntu_latest.sif` and `ubuntu_26.04.sif` can both
+  resolve to the same blob); last add wins, so `latest`-style aliases update as
+  new content is stored. Names may be registry-style
+  (`docker.io/library/busybox`); the clean name is what every command
+  takes and prints. `blob list` prints the recorded names (the index, not
+  the CAS). See [CONCEPTS.md](CONCEPTS.md) "Name index"
 
 ## Usage
 
@@ -99,39 +73,17 @@ blob sum -c <list> [<list>...] # verify the lines of a checksum list against loc
 blob sum -c -i <list>          # -i/--ignore-missing: skip files that are not present
 ```
 
-**Compute.** `blob sum <file>...` (alias `hash`) prints each file's CID
-`sha256sum`-style — `<cid>  <file>` (two spaces), one line per file — without
-storing anything. A
-convenience so you don't need a shell wrapper to turn files into addresses
-(same family as `lookup` and `ipfs add --only-hash`). Files are hashed
-independently: an unreadable file reports its own `Error:` line and a
-non-zero exit, but the other files still produce their lines. An argument of
-`-` reads stdin, like `sha256sum -`: `cat file | blob sum -` — computed in a
-single streaming pass (the codec is read off the first byte as it flows into
-the hash), so it is not limited by the size of the input and needs no
-temporary file.
+Prints each file's CID in the `sha256sum` shape (`<cid>  <file>`), without
+storing anything. Because each line records the **full CID** — the hash
+algorithm *and* the codec — a check needs no digest-style parsing and has no
+"improperly formatted" lines ([CONCEPTS.md](CONCEPTS.md) "Content
+addressing (CID)").
 
-**Verify.** `blob sum -c <list>` reads one or more checksum lists whose lines
-are `<cid>  <file>` (exactly the shape of `blob sum` output) and, for each
-line, recomputes the *local* `file`'s CID and reports
-
-- `<file>: OK` — the local file hashes to the CID on the line;
-- `<file>: FAILED` — the file is there but its content differs;
-- `<file>: FAILED open or read` — the file could not be read (missing, etc.)
-
-and exits non-zero if any entry fails or is unreadable. Blank and `#`-comment
-lines are skipped. It never touches the store: verification hashes the named
-local file in place (we do not yet verify against the blob store).
-
-Unlike `sha256sum`, each line records the **full CID** — it carries the hash
-algorithm *and* the codec — so `-c` needs no digest-style parsing and has no
-"improperly formatted" lines; `sha256sum` only says "64 hex chars" and must
-assume they are SHA-256.
-
-`-i` / `--ignore-missing` skips entries whose file cannot be read instead of
-failing with a `FAILED open or read` line — the common case of a checksums file
-covering every arch while only one arch's file is locally present. A genuine
-content mismatch is still reported and still fails.
+`-c <list>` verifies one or more such lists against the local files they name,
+reporting `<file>: OK`, `FAILED`, or `FAILED open or read` — it hashes the local
+file in place and never touches the store. `-i` / `--ignore-missing` skips entries
+whose file is not present (a mismatch still fails). `-` reads stdin in one streaming
+pass, like `sha256sum -`.
 
 ### Add to blob store
 
@@ -185,9 +137,8 @@ Options:
   hint to use `get` to materialize a local file first. `apptainer run <path>`
   then runs straight from the store's dir.
 - `--verify` - Re-hash the retrieved data against the blob's resolved multihash
-  and fail if the content does not match. The data is downloaded to a temporary
-  file and renamed into place only after the check passes, so a failed
-  verification leaves no partial or mismatched file at the output path
+  and fail if it does not match (a failed check leaves no partial file at the
+  output path)
 
 ### Print a blob to stdout
 
@@ -220,8 +171,7 @@ ubuntu_latest.sif
 
 `--long` / `-l` prints one tab-separated line per name with the name's CID and
 the blob's size in bytes (`name<TAB>cid<TAB>size`) — the same values `lookup`
-and `get --only-size` report, for every name in one place. A blob shared by
-several names is resolved once, not per name.
+and `get --only-size` report, for every name in one place.
 
 ```console
 $ blob list -l
@@ -235,10 +185,8 @@ ubuntu_latest.sif   v05ah...j8dg    52428800
 blob lookup <name>
 ```
 
-Convenience wrapper: resolves an index name to the stored blob's CID by peeking
-the blob's first byte (the same content-based codec rule as `add`/`sum`) — no
-re-hash, bounded by one byte regardless of blob size. Not required (the CID is
-on disk / in the index), but handy:
+Convenience wrapper: resolves an index name to the stored blob's CID. Not required
+(the CID is on disk / in the index), but handy:
 
 ```bash
 blob lookup ubuntu_latest.sif
@@ -260,11 +208,9 @@ sha256:d79f2e37784e5cd8631963896ebc6c9c66934af94a1854504717eaec04bc3d09
 blob cid <cid|name>
 ```
 
-Decodes a CID (any multibase) or resolves an index name to that CID — and prints
-a breakdown of its CIDv1 parts: multibase, version, codec (name + hex code),
-multihash (name + hex code, size in bits/bytes), and the raw digest in lower-case
-base16. A pure decode: a CID argument never opens a backend, a name argument
-resolves it read-only and derives the codec the same way `lookup` does.
+Decodes a CID (any multibase) and prints its parts — multibase, version, codec,
+multihash, and the raw digest; a name argument is resolved to its CID first, then
+printed the same way.
 
 ```console
 $ blob cid v060084h005dbqvqsolt2rmabem8f0imo1117742uscvcbjlulph2eqknv1h0
@@ -332,22 +278,11 @@ output are local layouts); serving an already-imported layout as a registry is
 OCI distribution *read* API under `/v2/` (see the "OCI distribution pull"
 section below).
 
-**Bare files (single-layer artifacts).** A bare file's OCI shape — the
-`index.json`, its manifest, and the `{}` config — is a *pure function of the
-file's bytes* (the layer digest, its size, and the SIF-vs-generic media types
-are all re-derived from content, nothing extra). That fact drives the two
-read/interop commands:
-
-- `oci ls` **reports what the store holds.** It works for a stored OCI image
-  layout, and for a bare file *only when it was `oci import`-ed* (that is what
-  persisted the scaffold alongside the layer). For a bare file added only with
-  `blob add` there is no scaffold in the store, so `oci ls` says so rather than
-  inventing one.
-- `oci export` **produces interop output** and never writes to the store: it
-  works for *any* stored blob, wrapping a bare file in its canonical artifact
-  and writing the scaffold (index/manifest/`{}` config) **to the output
-  layout only**. A `blob add`-ed file therefore exports to a valid OCI artifact
-  even though nothing OCI-shaped was ever stored for it.
+For a bare file, `oci ls` **reports what the store holds** (it works only when
+that file was `oci import`-ed, which persisted its scaffold), while
+`oci export` **writes the layout out** for any stored blob — so a `blob add`-ed
+file still exports to a valid artifact ([DESIGN.md](DESIGN.md) "OCI import /
+export").
 
 Two behaviors follow. A *name* is any string the user chose — `add` and
 `oci import` also accept a foreign digest or reference (an `ipfs add` CID,
@@ -363,39 +298,24 @@ content, and a name may drift or be remapped while it holds. See
 blob serve [--listen/-l <host:port>]
 ```
 
-Starts a read-only HTTP gateway (similar to the IPFS HTTP gateway, but for this
-local store) on the given address, default `127.0.0.1:8080`. It exposes two read
-paths:
+Starts a read-only HTTP gateway (like the IPFS HTTP gateway, but for this local
+store) on the given address, default `127.0.0.1:8080`. Two read paths:
 
 ```text
 GET /blob/<CID>     stream the blob
 GET /name/<name>    resolve the name, then 302 → /blob/<CID>
 ```
 
-`/blob/<CID>` lets a stable `blob://<CID>` scheme be mapped to
-`http://<host:port>/blob/<CID>` without the client learning about backends,
-storage paths, etc. The response is the blob bytes, streamed (never buffered
-whole), with these headers:
-
-- `Content-Type` — `application/json` if the CID's codec is `Json`, else
-  `application/octet-stream`
-- `Content-Length`
-- `Content-Digest: sha-256=<base64(digest)>` — the stored multihash digest, for
-  the client to verify against
-- `Last-Modified` — the store's last-modified time for the blob (RFC 7231), i.e.
-  when it was added to the store; useful for conditional requests and
-  maintenance (e.g. finding and pruning old blobs). Omitted by a backend that
-  does not track one
-
-`/name/<name>` does not serve the bytes itself: it resolves the name to the
-stored blob, derives its CID (peeking the first byte for the codec), and `302`-redirects
-to the canonical `/blob/<CID>` — the same name→blob pointer the dir backend's
-symlink is on disk. A 302 (not 301) so the mutable name→CID mapping (last add
-wins) is not cached. Clients that follow redirects (`curl -L`, browsers) end up
-at the identical `/blob/<CID>` response; those that don't still get the CID in
-the `Location` header.
-
-The gateway is **read-only** (no upload); `add` covers writes.
+`/blob/<CID>` streams the bytes (never buffered whole) so a stable
+`blob://<CID>` maps to `http://<host:port>/blob/<CID>` without the client
+knowing the backend; the response carries `Content-Length`, `Content-Type`,
+`Content-Digest: sha-256=…` (the stored digest, for the client to verify
+against), and — where the backend tracks it — `Last-Modified`
+([CONCEPTS.md](CONCEPTS.md) "HTTP gateway").
+`/name/<name>` resolves the name and `302`-redirects to the canonical
+`/blob/<CID>` (a 302, not 301, because the name→CID mapping is mutable — last add
+wins; `curl -L` follows it, a redirect-averse client gets the CID in
+`Location`). The gateway is **read-only** (no upload); `add` covers writes.
 
 ```bash
 # serve in one terminal (dir backend, default path)
@@ -411,37 +331,16 @@ curl -L http://127.0.0.1:8080/name/test.json
 ### OCI distribution pull (`/v2/`)
 
 The same server speaks the OCI distribution *read* API, so a layout you import
-is pullable by stock OCI clients without exporting it. The repository name is
-the CID the store already prints (`blob oci import` → `index <CID>`) or a stored
-name:
+is pullable by stock OCI clients (`podman`, `oras`, `skopeo`) without an
+`oci export` step. The repository name is the CID `oci import` printed or a
+stored name, the only tag is `latest`, and a stored **bare file is pullable by
+name too** (its OCI artifact is reconstructed on demand, never added to the
+store). Read-only (no push), no auth, no HTTPS — treat the base as a trusted
+plain-HTTP registry (localhost by default).
 
-```text
-GET /v2/                                            # ping
-GET /v2/blob/<CID>/manifests/latest                 # primary: the layout index
-GET /v2/blob/<CID>/blobs/sha256:...                 # primary: an inner component
-GET /v2/name/<name>/manifests/latest                # secondary: same, by name
-GET /v2/name/<name>/blobs/sha256:...                # secondary: an inner component
-```
-
-- `<CID>` is the outer (index-root) CID from `oci import`; its multihash *is*
-  the store key of the layout's `index.json`, so the OCI pull and the `blob://`
-  gateway (`/blob/<CID>`) hit the same index blob. Inner components stay
-  `sha256:<hex>` (no CID needed) — just find them with `oci ls <name>`.
-- A stored **bare file is pullable by name too** — not only a full layout.
-  `oci import myapp.sif` (and even a plain `add`/`get`) can be pulled as
-  `docker://host/name/myapp.sif:latest`: the artifact's `index.json`,
-  manifest, and `{}`-config are **reconstructed on demand** (a pure function
-  of the stored bytes), served from memory, and never written to the store.
-  So `blob add` of a file and `oci import` of that same file are both pullable
-  by name, with identical OCI shape and no extra CAS entries.
-- The only tag is `latest` (→ the layout index); there is no tag map because the
-  store has no name:tag split.
-- Read-only (no push), no auth, no HTTPS — the server assumes a **plain-HTTP**
-  base on localhost, the way a trusted local registry is configured.
-- The manifest response carries the store's CID in a non-standard
-  `X-Blob-Cid` header (base32hex) — the OCI spec's `Docker-Content-Digest` is
-  `sha256:<hex>` and carries no codec, so it cannot pin the CID. Clients that
-  don't know about it ignore it.
+The `/v2/…` paths and the `X-Blob-Cid` header are in
+[IMPLEMENTATION.md](IMPLEMENTATION.md) "daemon"; the tag policy, in
+[CONCEPTS.md](CONCEPTS.md) "OCI, the closest cousin".
 
 ```bash
 # terminal 1: import + serve
@@ -474,7 +373,7 @@ The backend is chosen by the usual `--storage`/`--path` flags (a *read-only*
 open, the same as `serve`), so `name/` and `blob/` present whichever backends
 you point at:
 
-```
+```text
 name/<name>   one symlink per recorded index name, linking to the blob's CID
 blob/<CID>    the content as a regular file, streamed on read
 ```
@@ -573,8 +472,7 @@ test
 
 Point `--path` at a remote server that stores the blobs — typically one an
 operator has already provisioned. This client does nothing but send
-`PUT`/`GET`/`HEAD`; nothing is created on the server. Credentials via
-`--user`/`--pass` (or `BLOB_USER`/`BLOB_PASS`):
+`PUT`/`GET`/`HEAD`; nothing is created on the server:
 
 ```console
 $ blob --storage http --path http://localhost:8080 add test.txt
@@ -594,8 +492,7 @@ and a complete nginx setup: [BACKEND.md](BACKEND.md).
 Point `--path` at an S3-compatible endpoint (Ceph RADOS Gateway is the primary
 target; MinIO and AWS S3 work too) and `--bucket` at a store within it. As
 with the other backends this client provisions nothing — point it at a bucket
-an operator has already created. Credentials via `--user`/`--pass` (or
-`BLOB_USER`/`BLOB_PASS`, the access/secret key):
+an operator has already created:
 
 ```console
 # Ceph RGW at 127.0.0.1:7480 (the default RGW S3 port), bucket `blobstore`
