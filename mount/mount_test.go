@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
-	"strings"
 	"syscall"
 	"testing"
 
@@ -238,118 +239,215 @@ func TestNameSurface(t *testing.T) {
 	}
 }
 
-// TestOciSurface checks the oci/ tree: it lists the recorded upstream-reference
-// names (in the shape oci/<os>/<arch>/<algo>/<hex>) level by level, each leaf
-// being a symlink to ../blob/<derived-CID>, and unknown shapes resolve to ENOENT.
-// Two arches under the same index digest may coexist — the whole point of the
-// arch directory — and each points to its own blob.
-func TestOciSurface(t *testing.T) {
-	m := newMem()
-	amdBlob := []byte(`{"build":"amd64"}`)
-	armBlob := []byte(`{"build":"arm64"}`)
-	amk := m.store(t, "alpine-amd.sif", amdBlob)
-	arK := m.store(t, "alpine-arm.sif", armBlob)
+// TestOciSurfaceListing checks that each level of the oci/ tree lists exactly
+// the recorded values at that depth (and no more), so the top-level tree shows
+// the variants recorded, the second level per variant shows the OS, etc.
+func TestOciSurfaceListing(t *testing.T) {
+	_, ot, keys := ociSurfaceSetup(t)
 	const idx = "3f4d6b32e26703c6"
-	if err := m.Index("oci/linux/amd64/sha256/"+idx, amk); err != nil {
-		t.Fatal(err)
+	_ = keys
+	type lvl struct {
+		node *ociTree
+		name string
+		want []string
 	}
-	if err := m.Index("oci/linux/arm64/sha256/"+idx, arK); err != nil {
-		t.Fatal(err)
+	// Walk the full blob branch and assert each level's listing.
+	bt := ociChild(t, ot, "blob")
+	lt := ociChild(t, bt, "linux")
+	amt := ociChild(t, lt, "amd64")
+	sht := ociChild(t, amt, "sha256")
+	cases := []lvl{
+		{ot, "oci/", []string{"blob", "image"}},
+		{bt, "oci/blob/", []string{"linux"}},
+		{lt, "oci/blob/linux/", []string{"amd64", "arm64"}},
+		{amt, "oci/blob/linux/amd64/", []string{"sha256"}},
+		{sht, "oci/blob/linux/amd64/sha256/", []string{idx}},
+	}
+	for _, c := range cases {
+		list, err := c.node.ReadDirAll(ctx)
+		if err != nil {
+			t.Fatalf("%s: ReadDirAll: %v", c.name, err)
+		}
+		var got []string
+		for _, e := range list {
+			got = append(got, e.Name)
+		}
+		if len(got) != len(c.want) {
+			t.Errorf("%s: listing = %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for i, w := range c.want {
+			if got[i] != w {
+				t.Errorf("%s: got[%d]=%q, want %q (full listing %v)", c.name, i, got[i], w, got)
+			}
+		}
 	}
 
+	// The hex leaf is a DT_Link; the rest are DT_Dir.
+	hexList, _ := sht.ReadDirAll(ctx)
+	if len(hexList) == 1 && hexList[0].Type != fuse.DT_Link {
+		t.Errorf("hex leaf type = %v, want DT_Link", hexList[0].Type)
+	}
+
+	// Unknown leaf: not recorded → ENOENT.
+	if _, err := sht.Lookup(ctx, "XYZXZYX"); !isEnoent(err) {
+		t.Errorf("Lookup(leaf XYZXZYX): err = %v, want ENOENT", err)
+	}
+}
+
+// TestOciSurfaceLeaves checks that the leaf of each recorded reference, walked
+// through the tree, is a symlink whose *target* — when used as a real symlink
+// in a layout mirroring the mount — actually resolves to the correct
+// blob/<CID>. This is the authoritative test for the "../" depth: a wrong
+// count would make EvalSymlinks fail or land on the wrong file.
+func TestOciSurfaceLeaves(t *testing.T) {
+	m, ot, keys := ociSurfaceSetup(t)
+	const idx = "3f4d6b32e26703c6"
+	// Each case: path below the oci/ root (variant, os, arch, algo, hex) and
+	// the CID the leaf must name (derived via the standard codec rule from the
+	// stored payload + key in the mem — the same wantCID(t, ...) baseline).
+	type tc struct {
+		path []string
+		want string
+	}
+	cases := []tc{
+		{[]string{"blob", "linux", "amd64", "sha256", idx}, wantCID(t, keys.amdBlob, keys.mkBlob)},
+		{[]string{"blob", "linux", "arm64", "sha256", idx}, wantCID(t, keys.armBlob, keys.mkArm)},
+		{[]string{"image", "linux", "amd64", "sha256", idx}, wantCID(t, keys.amdIdx, keys.mkIdx)},
+	}
+	_ = m
+	for _, c := range cases {
+		// Walk to the leaf.
+		node := ot
+		for _, p := range c.path[:len(c.path)-1] {
+			node = ociChild(t, node, p)
+		}
+		leaf := ociLeaf(t, node, c.path[len(c.path)-1])
+		target, err := leaf.Readlink(ctx, &fuse.ReadlinkRequest{})
+		if err != nil {
+			t.Fatalf("Readlink(%v): %v", c.path, err)
+		}
+		// Lay out root/oci/<variant>/<os>/<arch>/<algo>/<hex> as a real dir
+		// and root/blob/<CID> as a real file, then check the target resolves.
+		ociLeafResolves(t, c.path, target, c.want)
+	}
+}
+
+// ociSurfaceSetup returns a mem store pre-populated with the three standard
+// reference names (blob/amd64, blob/arm64, image/amd64, all under the same
+// origin digest), plus the top-level ociTree and the keys/payloads for the
+// three stored blobs (so tests can derive the expected CIDs).
+func ociSurfaceSetup(t *testing.T) (*mem, *ociTree, struct {
+	amdBlob, armBlob, amdIdx []byte
+	mkBlob, mkArm, mkIdx     storage.Digest
+}) {
+	t.Helper()
+	m := newMem()
+	const idx = "3f4d6b32e26703c6"
+	mkBlob := m.store(t, "alpine-amd.sif", ociSetupPayloadAmdBlob)
+	mkArm := m.store(t, "alpine-arm.sif", ociSetupPayloadArmBlob)
+	mkIdx := m.store(t, "alpine-amd-oci-index.json", ociSetupPayloadAmdIdx)
+	for _, pair := range []struct {
+		nm   string
+		dgst storage.Digest
+	}{
+		{"oci/blob/linux/amd64/sha256/" + idx, mkBlob},
+		{"oci/blob/linux/arm64/sha256/" + idx, mkArm},
+		{"oci/image/linux/amd64/sha256/" + idx, mkIdx},
+	} {
+		if err := m.Index(pair.nm, pair.dgst); err != nil {
+			t.Fatalf("Index(%q): %v", pair.nm, err)
+		}
+	}
 	f := New(m)
-	root, _ := f.Root()
+	root, err := f.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
 	ociNode, err := root.(*rootNode).Lookup(ctx, "oci")
 	if err != nil {
 		t.Fatal(err)
 	}
-	ot := ociNode.(*ociTree)
+	keys := struct {
+		amdBlob, armBlob, amdIdx []byte
+		mkBlob, mkArm, mkIdx     storage.Digest
+	}{
+		ociSetupPayloadAmdBlob, ociSetupPayloadArmBlob, ociSetupPayloadAmdIdx,
+		mkBlob, mkArm, mkIdx,
+	}
+	return m, ociNode.(*ociTree), keys
+}
 
-	// Level 0: one distinct os
-	osList, err := ot.ReadDirAll(ctx)
+// ociChild advances into the next level of the tree (a directory).
+func ociChild(t *testing.T, n *ociTree, name string) *ociTree {
+	t.Helper()
+	child, err := n.Lookup(ctx, name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(osList) != 1 || osList[0].Name != "linux" || osList[0].Type != fuse.DT_Dir {
-		t.Fatalf("oci/ listing = %v, want [linux] (DT_Dir)", osList)
-	}
-
-	// Level 1: two arches under linux
-	linuxNode, _ := ot.Lookup(ctx, "linux")
-	lt := linuxNode.(*ociTree)
-	archList, err := lt.ReadDirAll(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := map[string]bool{}
-	for _, e := range archList {
-		got[e.Name] = true
-		if e.Type != fuse.DT_Dir {
-			t.Fatalf("oci/linux/%s type = %v, want DT_Dir", e.Name, e.Type)
-		}
-	}
-	if !got["amd64"] || !got["arm64"] || len(archList) != 2 {
-		t.Fatalf("oci/linux/ listing = %v, want [amd64 arm64]", archList)
-	}
-
-	// Level 2: one algo under each arch
-	amdNode, _ := lt.Lookup(ctx, "amd64")
-	amt := amdNode.(*ociTree)
-	algoList, _ := amt.ReadDirAll(ctx)
-	if len(algoList) != 1 || algoList[0].Name != "sha256" {
-		t.Fatalf("oci/linux/amd64/ listing = %v, want [sha256]", algoList)
-	}
-
-	// Level 3: the hex leaf (DT_Link)
-	shaNode, _ := amt.Lookup(ctx, "sha256")
-	sht := shaNode.(*ociTree)
-	hexList, _ := sht.ReadDirAll(ctx)
-	if len(hexList) != 1 || hexList[0].Name != idx || hexList[0].Type != fuse.DT_Link {
-		t.Fatalf("oci/linux/amd64/sha256/ listing = %v, want [%s] (DT_Link)", hexList, idx)
-	}
-
-	// The leaf is a symlink to the right blob (the amd64 one).
-	leaf, _ := sht.Lookup(ctx, idx)
-	link, ok := leaf.(*nameLink)
+	c, ok := child.(*ociTree)
 	if !ok {
-		t.Fatalf("leaf = %T, want *nameLink", leaf)
+		t.Fatalf("child(%s) = %T, want *ociTree", name, child)
 	}
-	gotTarget, err := link.Readlink(ctx, &fuse.ReadlinkRequest{})
+	return c
+}
+
+// ociLeaf advances into a leaf (a symlink).
+func ociLeaf(t *testing.T, n *ociTree, name string) *nameLink {
+	t.Helper()
+	child, err := n.Lookup(ctx, name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Target depth: the leaf lives 5 levels below the mount root
-	// (oci/<os>/<arch>/<algo>/<hex>), so 4 "../" hops from its parent
-	// back to the root, then blob/<CID>.
-	wantTarget := strings.Repeat("../", 4) + "blob/" + wantCID(t, amdBlob, amk)
-	if gotTarget != wantTarget {
-		t.Fatalf("readlink oci/linux/amd64/sha256/%s = %q, want %q", idx, gotTarget, wantTarget)
-	}
-
-	// Same index digest, different arch, different blob.
-	armNode, _ := lt.Lookup(ctx, "arm64")
-	art := armNode.(*ociTree)
-	aSha, _ := art.Lookup(ctx, "sha256")
-	aSht := aSha.(*ociTree)
-	aLeaf, _ := aSht.Lookup(ctx, idx)
-	aLink, ok := aLeaf.(*nameLink)
+	l, ok := child.(*nameLink)
 	if !ok {
-		t.Fatalf("arm leaf = %T, want *nameLink", aLeaf)
+		t.Fatalf("leaf(%s) = %T, want *nameLink", name, child)
 	}
-	aTarget, err := aLink.Readlink(ctx, &fuse.ReadlinkRequest{})
-	if err != nil {
+	return l
+}
+
+// ociLeafResolves lays out root/oci/<path parts...>/<leaf> and root/blob/<cid>
+// as real filesystem entries, then checks that target (a relative symlink
+// target) used at that leaf resolves to the expected blob. A wrong "../"
+// depth would fail EvalSymlinks or land on the wrong file.
+func ociLeafResolves(t *testing.T, belowOci []string, target, cid string) {
+	t.Helper()
+	root := t.TempDir()
+	var linkPath []string
+	linkPath = append(linkPath, "oci")
+	linkPath = append(linkPath, belowOci...)
+	link := filepath.Join(append([]string{root}, linkPath...)...)
+	want := filepath.Join(root, "blob", cid)
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	wantA := strings.Repeat("../", 4) + "blob/" + wantCID(t, armBlob, arK)
-	if aTarget != wantA {
-		t.Fatalf("readlink oci/linux/arm64/sha256/%s = %q, want %q", idx, aTarget, wantA)
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatal(err)
 	}
-
-	// Unknown leaf: not recorded in the name table → ENOENT at the leaf.
-	if _, err := sht.Lookup(ctx, "XYZXZYX"); !isEnoent(err) {
-		t.Fatalf("Lookup(leaf XYZXZYX): err = %v, want ENOENT", err)
+	if err := os.WriteFile(want, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	got, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		t.Fatalf("eval %q (target %q): %v", link, target, err)
+	}
+	if got != want {
+		t.Fatalf("got %q want %q (target %q)", got, want, target)
 	}
 }
+
+// The three payloads used by ociSurfaceSetup: the amd64 SIF, the arm64 SIF,
+// and the OCI image index (the same bytes as `add` would store for a SIF, the
+// arm64 twin, and a valid OCI index — each a distinct CAS entry).
+var (
+	ociSetupPayloadAmdBlob = []byte("alpine-amd64-bytes")
+	ociSetupPayloadArmBlob = []byte("alpine-arm64-bytes")
+	ociSetupPayloadAmdIdx  = []byte(`{"schemaVersion":2}`)
+)
+
 
 // TestBlobSurface checks blob/: a stored CID is a stat-able regular file that
 // streams the exact stored bytes back (page by page, forward-only); unknown

@@ -466,9 +466,15 @@ func registerOCICmds(root *cobra.Command) {
 		RunE:    runOCIAdd,
 	}
 	addCmd.Flags().StringArrayVarP(&ociNames, "name", "", []string{}, "additional index name to record (repeatable); the basename of the argument is always recorded as well — for a layout pointing at its index, for a bare file pointing at the file's own bytes (the artifact's single layer, the same key `blob add` uses)")
-	addCmd.Flags().StringVar(&ociUpstream, "upstream", "", "upstream OCI image-index digest the image came from (sha256:<hex> or bare hex); when set, the imported image is additionally recorded under an oci/<os>/<arch>/<algo>/<hex> name")
-	addCmd.Flags().StringVar(&ociPlatform, "platform", "", "platform the --upstream digest was pulled for (os/arch); if unset, --arch (or the local arch) is implied under linux")
-	addCmd.Flags().StringVar(&ociArch, "arch", "", "arch the --upstream digest was pulled for; a shortcut for --platform linux/<arch>")
+	addCmd.Flags().StringVar(&ociUpstream, "upstream", "", "the OCI multi-arch origin digest the image was pulled for (sha256:<hex> or a bare hex); when set, the import is additionally recorded under an oci/<variant>/<os>/<arch>/<algo>/<hex> name")
+	addCmd.Flags().StringVar(&ociPlatform, "platform", "", "platform the --upstream digest was pulled for (os/arch; e.g. linux/amd64); if unset, --arch (or the local arch) is implied under linux")
+	addCmd.Flags().StringVar(&ociArch, "arch", "", "arch the --upstream digest was pulled for; a shortcut for --platform linux/<arch>; if unset, the local arch is implied under linux")
+	// --variant is what the OCI leaf names. For a layout (dir or archive) it
+	// must be "image" or "artifact" — the *shape* of the layout (docker
+	// pull/save produces the former, ORAS / apptainer push the latter) and
+	// not something the store can sniff. For a bare file it is "blob"; the
+	// flag is ignored in that case (the variant follows the input shape).
+	addCmd.Flags().StringVar(&ociVariant, "variant", index.OciVariantImage, "what the OCI leaf names for a layout import: image (default) or artifact; for a bare file it is always blob")
 
 	getCmd := &cobra.Command{
 		Use:     "export <cid|name|digest> -o <dir | tar>",
@@ -553,12 +559,21 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Optionally record the OCI upstream reference name (oci/<os>/<arch>/
-	// sha256/<hex>) alongside. It is a plain name for the store (one flat
-	// segment under Encode) and never shadows the baseline name: both address
-	// the same key for this import, but each stays visible under its own
-	// spelling. The flags live in package main (shared with `add`), and the
-	// shape is built in index/ so both verbs produce byte-identical names.
+	// Optionally record the OCI origin reference name (oci/<variant>/<os>/
+	// <arch>/<algo>/<hex>) alongside. It is a plain name for the store (one
+	// flat segment under Encode) and never shadows the baseline name: both
+	// address the same key for this import, but each stays visible under its
+	// own spelling. The flags live in package main (shared with `add`), and
+	// the shape is built in index/ so both verbs produce byte-identical
+	// names.
+	//
+	// A bare-file import is always a "blob" variant: the leaf names the
+	// file's own bytes, not an OCI index. That decision is implicit in the
+	// input shape and not overridable — a bare file *is* a blob, full stop.
+	// For a layout the --variant flag (image/artifact) applies unchanged.
+	if ociUpstream != "" && nameTarget != "" {
+		ociVariant = index.OciVariantBlob
+	}
 	ref, refOK, refErr := ociRefName()
 	if refErr != nil {
 		return refErr

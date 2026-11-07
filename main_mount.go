@@ -103,6 +103,7 @@ func runMount(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Mounting read-only FUSE view of %s at %s\n", storagePath, mountPoint)
 	fmt.Printf("  %s/name/   the recorded index names (each a link to the blob's CID)\n", mountPoint)
+	fmt.Printf("  %s/oci/    origin references (oci/<variant>/<os>/<arch>/<algo>/<hex>) as links\n", mountPoint)
 	fmt.Printf("  %s/blob/   the content CAS, addressed by CID (listable-by-path, not enumerable)\n", mountPoint)
 	fmt.Printf("Unmount on Ctrl-C or SIGTERM.\n")
 

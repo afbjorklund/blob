@@ -5,7 +5,7 @@
 // transport prefers (HTTP/JSON for daemon, directory entries and symlinks
 // for mount).
 //
-// The mount presents the backend read-only. The root holds two directories:
+// The mount presents the backend read-only. The root holds three directories:
 //
 //	name/  - one symbolic link per recorded index name, linking to the
 //	         content's canonical blob path "../blob/<CID>". A FUSE symlink is
@@ -21,6 +21,16 @@
 //	         the right shape — the CAS is addressable, not listable, exactly
 //	         as daemon serves /blob/<CID> and the /v2/blob/<CID> OCI surface
 //	         without ever enumerating the store.
+//	oci/   - the origin-reference surface: a projection of the name index
+//	         restricted to names of the shape
+//	         "oci/<variant>/<os>/<arch>/<algo>/<hex>". The top four levels
+//	         are directories; the leaf is a symlink to
+//
+// "../../../../../../blob/<CID>" (six "../" hops — the leaf is six
+//
+//	directory levels below the mount root), so a client (e.g.
+//	apptainer's --basepath) can address a base image by a stable
+//	path per (variant, os, arch, algo, digest).
 //
 // Content reads are **streaming, forward-only, page-bounded** — the kernel
 // page cache does the re-read/caching the client would expect (it is FUSE's
@@ -31,7 +41,7 @@
 // serves a `Range` only for a fresh GET).
 //
 // Mounting (fuse.Mount) and the FUSE protocol loop (fs.Serve) are the
-// transport plumbing; everything FUSE-specific (the tree, the two top
+// transport plumbing; everything FUSE-specific (the tree, the three top
 // directories, the symlink target form, the streaming read) lives here.
 // Only the read path is implemented: a write attempt is refused by the
 // mount option ReadOnly() and, independently, by the backend
@@ -60,7 +70,7 @@ import (
 )
 
 // FS is the FUSE file system this package serves. It is a single shared,
-// read-only storage backend plus the fixed two-directory tree (name/, blob/)
+// read-only storage backend plus the fixed three-directory tree (name/, blob/, oci/)
 // that presents it. All backend use goes through the backend's own
 // concurrency story (pooled sql, per-op local files, serialised http/s3 — see
 // the storage.StorageBackend docs), so a single FS value is safe to hand to
@@ -137,9 +147,10 @@ var (
 	_ fs.HandleReleaser = (*blobHandle)(nil)
 )
 
-// rootNode is the filesystem root. Its only children are the two top
-// directories: name/ (the name index, listed from Names()) and blob/ (the
-// content CAS, addressable by CID, not listable).
+// rootNode is the filesystem root. Its children are the three top-level
+// directories: name/ (the name index, listed from Names()), blob/ (the
+// content CAS, addressable by CID, not listable), and oci/ (the
+// origin-reference surface, a projection of the name index).
 type rootNode struct{ fs *FS }
 
 func (n *rootNode) Attr(ctx context.Context, a *fuse.Attr) error {
@@ -452,18 +463,19 @@ func (h *blobHandle) Release(_ context.Context, _ *fuse.ReleaseRequest) error {
 	return nil
 }
 
-// ociTree is the upstream-reference surface: a 5-level projection of the
-// name index restricted to names of the shape "oci/<os>/<arch>/<algo>/<hex>".
-// The top three levels (os / arch / algo) are directories; the leaf is a
-// symlink (a nameLink) to the blob's canonical path, exactly like the
-// entries under name/.
+// ociTree is the OCI-reference surface: a 5-level projection of the name index
+// restricted to names of the shape "oci/<variant>/<os>/<arch>/<algo>/<hex>".
+// The top four levels (variant / os / arch / algo) are directories; the leaf
+// (hex) is a symlink (a nameLink) to the blob's canonical path, exactly like
+// the entries under name/.
 //
 // The node is parameterised by the depth of the path walked so far:
 //
-//	level 0  = walking the os components
-//	level 1  = walking the arch components
-//	level 2  = walking the algo components
-//	level 3  = walking the hex leaves (symlinks)
+//	level 0  = walking the variant components (blob / image / artifact)
+//	level 1  = walking the os components
+//	level 2  = walking the arch components
+//	level 3  = walking the algo components
+//	level 4  = walking the hex leaves (symlinks)
 //
 // The target of each name is derived the same way nameDir.Lookup does
 // (backend.Lookup for the key, backend.Peek for the first-byte codec,
@@ -493,16 +505,16 @@ func (n *ociTree) ReadDirAll(_ context.Context) ([]fuse.Dirent, error) {
 	seen := map[string]bool{}
 	out := []fuse.Dirent{}
 	for _, nm := range names {
-		os_, arch, algo, hex, ok := index.ParseOciRefName(nm)
+		variant, os_, arch, algo, hex, ok := index.ParseOciRefName(nm)
 		if !ok {
 			continue
 		}
-		components := []string{os_, arch, algo, hex}
-		if n.level >= len(components) {
+		components := []string{variant, os_, arch, algo, hex}
+		if n.level >= index.OciLevels {
 			continue
 		}
 		// The walked prefix must match this name's leading components: the
-		// tree walks in the order os, arch, algo, hex.
+		// tree walks in the order variant, os, arch, algo, hex.
 		if n.level > 0 {
 			want := index.OciPrefix + "/" + strings.Join(components[:n.level], "/")
 			if want != index.OciPrefix+"/"+strings.Join(n.walked, "/") {
@@ -515,7 +527,7 @@ func (n *ociTree) ReadDirAll(_ context.Context) ([]fuse.Dirent, error) {
 		}
 		seen[cur] = true
 		t := fuse.DT_Dir
-		if n.level == 3 {
+		if n.level == index.OciLevels-1 {
 			t = fuse.DT_Link
 		}
 		out = append(out, fuse.Dirent{Name: cur, Type: t})
@@ -524,26 +536,26 @@ func (n *ociTree) ReadDirAll(_ context.Context) ([]fuse.Dirent, error) {
 }
 
 // Lookup resolves the next component (at the current level) to either an
-// inner ociTree one level deeper (level < 3) or a nameLink leaf pointing at
-// the blob's canonical path (level == 3). The full canonical name is
-// "oci/" + the walked components, joined by "/" and recorded as a single
-// flat segment under index.Encode.
+// inner ociTree one level deeper (level < OciLevels-1) or a nameLink leaf
+// pointing at the blob's canonical path (level == OciLevels-1). The full
+// canonical name is "oci/" + the walked components, joined by "/" and
+// recorded as a single flat segment under index.Encode.
 func (n *ociTree) Lookup(_ context.Context, name string) (fs.Node, error) {
-	if n.level > 3 {
+	if n.level > index.OciLevels-1 {
 		return nil, syscall.ENOENT
 	}
 	newWalked := append(append([]string{}, n.walked...), name)
 
-	if n.level < 3 {
+	if n.level < index.OciLevels-1 {
 		return &ociTree{fs: n.fs, level: n.level + 1, walked: newWalked}, nil
 	}
 
-	full := index.BuildOciName(newWalked[0], newWalked[1], newWalked[2], newWalked[3])
+	full := index.BuildOciName(newWalked[0], newWalked[1], newWalked[2], newWalked[3], newWalked[4])
 	// Defensive re-parse: the tree already filters to well-formed shapes in
 	// ReadDirAll, but a caller may walk directly — verify the shape before
 	// we consult the name table (a malformed hex, an extra component, etc.
 	// is not this surface's).
-	if _, _, _, _, ok := index.ParseOciRefName(full); !ok {
+	if _, _, _, _, _, ok := index.ParseOciRefName(full); !ok {
 		return nil, syscall.ENOENT
 	}
 
@@ -565,10 +577,11 @@ func (n *ociTree) Lookup(_ context.Context, name string) (fs.Node, error) {
 	if rerr != nil {
 		return nil, rerr
 	}
-	// Target is relative to the leaf's directory: the leaf at depth 5 (oci +
-	// os + arch + algo + hex under the root) needs 5 - 1 = 4 "../" hops to
-	// climb back to the root, then down into "blob/<CID>" — the same shape
-	// name/ uses (one "../" to climb from depth 1 to depth 0).
-	target := strings.Repeat("../", 4) + "blob/" + cidStr
+	// Target is relative to the leaf's *directory*: the link lives in
+	// oci/<variant>/<os>/<arch>/<algo>/ (five components below the root), and
+	// a relative symlink target resolves from the file's containing directory,
+	// so five "../" hops climb back to the root, then down into "blob/<CID>" —
+	// the same shape name/ uses (one "../" per level of its containing dir).
+	target := strings.Repeat("../", 5) + "blob/" + cidStr
 	return &nameLink{target: target}, nil
 }

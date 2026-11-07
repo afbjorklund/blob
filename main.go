@@ -47,10 +47,11 @@ var (
 	ociNames []string
 
 	// OCI upstream reference: record the blob under an
-	// "oci/<os>/<arch>/<algo>/<hex>" name (the multi-arch provenance ref).
+	// "oci/<variant>/<os>/<arch>/<algo>/<hex>" name (the origin reference).
 	ociUpstream string
 	ociPlatform string
 	ociArch     string
+	ociVariant  string
 
 	// cid
 	cidBase string
@@ -90,14 +91,25 @@ func defaultS3Region() string {
 	return os.Getenv("BLOB_S3_REGION")
 }
 
-// ociRefName returns the canonical "oci/<os>/<arch>/sha256/<hex>" name for the
-// --upstream/--platform/--arch flags, or false when the blob was not recorded
-// with an upstream reference. It is the single point where the three flags
-// combine into the record shape, so `add` and `oci import` share it and never
-// drift.
+// ociRefName returns the canonical "oci/<variant>/<os>/<arch>/<algo>/<hex>"
+// name for the --upstream/--platform/--arch/--variant flags, or false when the
+// blob was not recorded with an origin reference. It is the single point where
+// the flags combine into the record shape, so `add` and `oci import` share it
+// and never drift.
 func ociRefName() (ref string, ok bool, err error) {
 	if ociUpstream == "" {
 		return "", false, nil
+	}
+	if ociVariant == "" {
+		// A caller that sets --upstream but not --variant is asking for an
+		// origin reference without declaring what the leaf names. The default
+		// depends on the verb: `add` (a bare file) → "blob"; `oci import` of
+		// a layout → "image" (or "artifact" by flag). That default is set by
+		// the verb before this is called, so a non-empty variant is expected.
+		return "", false, fmt.Errorf("--upstream requires --variant (one of: blob, image, artifact)")
+	}
+	if !index.OciVariantValid(ociVariant) {
+		return "", false, fmt.Errorf("invalid --variant %q (one of: blob, image, artifact)", ociVariant)
 	}
 	algo, hexv, err := index.NormalizeOciDigest(ociUpstream)
 	if err != nil {
@@ -107,7 +119,7 @@ func ociRefName() (ref string, ok bool, err error) {
 	if err != nil {
 		return "", false, fmt.Errorf("--platform/--arch: %w", err)
 	}
-	return index.BuildOciName(osName, arch, algo, hexv), true, nil
+	return index.BuildOciName(ociVariant, osName, arch, algo, hexv), true, nil
 }
 
 // resolveOciPlatform combines --platform and --arch: --platform (os/arch)
@@ -274,9 +286,9 @@ func main() {
 	}
 
 	addCmd.Flags().BoolVarP(&hashOnly, "only-hash", "n", false, "only compute and print the hash, do not store")
-	addCmd.Flags().StringVar(&ociUpstream, "upstream", "", "upstream OCI image-index digest the blob came from (sha256:<hex> or bare hex); when set, the blob is additionally recorded under an oci/<os>/<arch>/<algo>/<hex> name")
-	addCmd.Flags().StringVar(&ociPlatform, "platform", "", "platform the --upstream digest was pulled for (os/arch; e.g. linux/amd64); if unset, --arch (or the local arch) is implied under linux")
-	addCmd.Flags().StringVar(&ociArch, "arch", "", "arch the --upstream digest was pulled for; a shortcut for --platform linux/<arch>; if unset, the local arch (linux/"+runtime.GOARCH+") is implied")
+	addCmd.Flags().StringVar(&ociUpstream, "upstream", "", "the OCI multi-arch origin digest the blob came from (sha256:<hex> or a bare hex); when set, the blob is additionally recorded under an oci/blob/<os>/<arch>/<algo>/<hex> name")
+	addCmd.Flags().StringVar(&ociPlatform, "platform", "", "platform the --upstream digest was built for (os/arch; e.g. linux/amd64); if unset, --arch (or the local arch) is implied under linux")
+	addCmd.Flags().StringVar(&ociArch, "arch", "", "arch the --upstream digest was built for; a shortcut for --platform linux/<arch>; if unset, the local arch (linux/"+runtime.GOARCH+") is implied")
 
 	rootCmd.AddCommand(addCmd)
 
@@ -384,15 +396,17 @@ lines.`,
 
 	mountCmd := &cobra.Command{
 		Use:   "mount",
-		Short: "Mount the store read-only as a FUSE filesystem (name/ + blob/) and serve until SIGINT/SIGTERM",
+		Short: "Mount the store read-only as a FUSE filesystem and serve until SIGINT/SIGTERM",
 		Long: "Mount the store read-only as a local FUSE filesystem (Linux only), the\n" +
-			"filesystem analogue of serve: the store's two read namespaces are exposed as two\n" +
+			"filesystem analogue of serve: the store's read namespaces are exposed as\n" +
 			"directories inside the mount point (default $HOME/.blob-mount):\n" +
 			"\n" +
-			"  name/<name>   one symlink per recorded index name, linking to ../blob/<CID>\n" +
-			"                (list the index: `ls name/`)\n" +
-			"  blob/<CID>    the content as a regular file, streamed on read (addressed by CID,\n" +
-			"                not enumerable — `ls blob/` is empty)\n" +
+			"  name/<name>    one symlink per recorded index name, linking to ../blob/<CID>\n" +
+			"                 (list the index: `ls name/`)\n" +
+			"  oci/.../<hex>  origin references (oci/<variant>/<os>/<arch>/<algo>/<hex>),\n" +
+			"                 each a link to the blob it names\n" +
+			"  blob/<CID>     the content as a regular file, streamed on read (addressed by CID,\n" +
+			"                 not enumerable — `ls blob/` is empty)\n" +
 			"\n" +
 			"The mount is read-only (a write from the shell is refused). Like serve, it runs\n" +
 			"in the foreground for the life of the process and unmounts on SIGINT/SIGTERM.\n" +
@@ -546,6 +560,13 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	// shadows the baseline name: the two address the same blob key for this
 	// add, but a name recorded under one and not the other stays visible
 	// under its own spelling.
+	// A bare file recorded via `add` is always a "blob" variant: the leaf is
+	// the file bytes themselves, not an OCI index JSON. The variant is set
+	// here (not on the flag) so the user cannot accidentally record a
+	// non-file under a file-only name.
+	if ociUpstream != "" {
+		ociVariant = index.OciVariantBlob
+	}
 	ref, ok, refErr := ociRefName()
 	if refErr != nil {
 		return refErr

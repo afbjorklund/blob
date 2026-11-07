@@ -96,6 +96,16 @@ and CID-shape decisions live beside the ones they bridge):
   hierarchy, it becomes one flat segment (`docker.io/library/busybox` →
   `docker.io%2Flibrary%2Fbusybox`). `Decode` is tolerant: a stray `%` is
   passed through literally, so a store predating `Encode` still reads.
+- `IsOciRef(nm)` / `ParseOciRefName(nm)` / `BuildOciName(...)` /
+  `OciVariantValid(v)` / `NormalizeOciDigest(d)` / `NormalizePlatform(p)`
+  (in `oci.go`) — the origin-reference name conventions: the
+  `oci/<variant>/<os>/<arch>/<algo>/<hex>` shape a user records with
+  `--upstream --arch`. The shape is checked once, here, so the write path
+  (`main.go`, `main_oci.go`) and the FUSE tree (`mount.go`) agree on it.
+  An origin reference is an ordinary name (one flat segment after
+  `Encode`), not a backend-specific construct; the `variant` component is
+  what the leaf names (`blob` / `image` / `artifact`), disambiguating e.g.
+  a SIF and an OCI layout of the same upstream image.
 
 ## oci/
 

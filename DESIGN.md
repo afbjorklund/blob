@@ -199,35 +199,52 @@ is the content, and the content decides the CID. The user may re-map a
 is the non-mutable reference**, and the label remains a mutable alias
 the user is free to remap.
 
-## Multiarch references as names
+## Origin references as names
 
-The same multiarch liberty has a second face: the *registry* digest for
-a multiarch image is an identifier the user has, but it *does not name
-any content in the CAS* — it is the hash of an index we do not store.
-If we let `registry@digest` collide across arches, a linux/amd64 save
-and a linux/arm64 save of the same upstream image would fight over the
-same name. So the two are **disambiguated by shape**, in a name class
-of their own:
+The same multiarch liberty has a second face: the *multi-arch index*
+digest for an image is an identifier the user has, but it *does not
+name content in the CAS* — it is the hash of an index we do not store.
+A re-save of the same image, or the same image converted to a SIF, has
+different bytes and a different digest, yet the user still means "the
+image I pulled as `...@sha256:X`". So we record the **origin** (the
+foreign digest **plus** the classification the content needs) as a
+first-class name, and let each `(variant, os, arch, digest)` be a
+separate, unambiguous entry. If we let `registry@digest` collide across
+arches, a linux/amd64 save and a linux/arm64 save of the same upstream
+image would fight over the same name. So the two are **disambiguated by
+shape**, in a name class of their own:
 
-- **Shape**: `oci/<os>/<arch>/<algo>/<hex>` (e.g.
-  `oci/linux/amd64/sha256/3f4d6b32e267…`). Each component is a
-  classification (format, OS, arch, digest algorithm) and the leaf is
-  the identifier.
-- **Source**: the `--upstream` flag on `add` and `oci import` (plus
-  `--platform` or `--arch`). It accepts the full OCI digest
-  (`sha256:<hex>`) or a bare hex (assumed sha256); non-sha256 algos
-  are rejected at import — the store only bridges that one.
+- **Shape**: `oci/<variant>/<os>/<arch>/<algo>/<hex>` (e.g.
+  `oci/blob/linux/amd64/sha256/a46257e0…`). Each component is a
+  classification: `variant` (what the leaf names), `os`/`arch`
+  (the platform), `algo`/`hex` (the foreign digest). Only the leaf
+  carries an identifier; the rest are classifications.
+- **Variant**: what the name points at. `blob` — the raw file bytes
+  (a SIF or a tar, the thing `apptainer --basepath` wants); `image` —
+  an OCI image index (the layout `docker save` produces); `artifact` —
+  an OCI artifact index (the layout `oras`/`apptainer push` produces).
+  `add <file>` is always `blob`; `oci import <layout>` is `image` or
+  `artifact` (the shape the user declared, not something the store can
+  sniff); `oci import <bare-file>` is `blob`. This lets three
+  co-exist under one `(os, arch, digest)` — the SIF, the image layout,
+  and the artifact layout — each at its own path, each naming its own
+  stored CID.
+- **Source**: the `--upstream` flag (plus `--platform` or `--arch`) on
+  `add` and `oci import`, plus `--variant` on `oci import` (default
+  `image`). `--upstream` accepts the full OCI digest (`sha256:<hex>`)
+  or a bare hex (assumed sha256); non-sha256 algos are rejected at
+  import — the store only bridges that one.
 - **Storage**: a plain name, like any other — one flat segment in the
   name index (the `/`s are escaped via the same `index.Encode` every
   registry-style name uses), resolved through the same name-index path
   as `blob get`/`lookup`/`cat` and served by the same `/name/<name>`
   gateway. No new backend API, no new mount option.
 - **Mount surface**: it is also projected as the `oci/` top directory
-  in the FUSE view — a 5-level directory tree where the leaf is a
-  symlink to `../blob/<CID>`. A client that wants a flat base path
-  like apptainer's `--basepath` passes
-  `<mount>/oci/linux/amd64/sha256` and reads the file `<hex>` under
-  it.
+  in the FUSE view — a 5-level directory tree (variant / os / arch /
+  algo / hex) where the leaf is a symlink to `../../blob/<CID>`. A
+  client that wants a flat base path like apptainer's `--basepath`
+  passes `<mount>/oci/blob/<os>/<arch>/<algo>` and reads the file
+  `<hex>` under it.
 
 The shape is chosen to *avoid* the direct-handle path in the resolver:
 `oci/...` is not a CID, not a bare OCI digest, and not a digest-shaped
