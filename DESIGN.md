@@ -219,22 +219,21 @@ shape**, in a name class of their own:
   classification: `variant` (what the leaf names), `os`/`arch`
   (the platform), `algo`/`hex` (the foreign digest). Only the leaf
   carries an identifier; the rest are classifications.
-- **Variant**: what the name points at. `blob` — the raw file bytes
-  (a SIF or a tar, the thing `apptainer --basepath` wants); `image` —
-  an OCI image index (the layout `docker save` produces); `artifact` —
-  an OCI artifact index (the layout `oras`/`apptainer push` produces).
-   `oci import <bare-file>` is always `blob`; `oci import <layout>` is
-   `image` or `artifact` (the shape the user declared, not something the
-   store can sniff). This lets three co-exist under one `(os, arch,
-   digest)` — the SIF, the image layout, and the artifact layout — each
-   at its own path, each naming its own stored CID. The flags are an OCI
-   concern and live only on `oci import`: a plain `blob add` records
-   only the basename and never files an `oci/` name.
+- **Variant**: what the name points at. `blob` — a blob (raw file bytes: a
+  SIF, a tar, a layer, a config), the thing `apptainer --basepath` wants;
+  `json` — the OCI index / manifest (the layout `docker`/`podman save`
+  produces, or the single-layer scaffold `oras`/`apptainer push` produce).
+  An OCI image and an OCI artifact are the same JSON structure, so they
+  share the one `json` value. It is not a flag: it follows the input shape —
+  `oci import <bare-file>` is always `blob`, `oci import <layout>` is always
+  `json`. This lets two co-exist under one `(os, arch, digest)` — the SIF
+  and the OCI layout — each at its own path, each naming its own stored CID.
+  The flags are an OCI concern and live only on `oci import`: a plain
+  `blob add` records only the basename and never files an `oci/` name.
 - **Source**: the `--upstream` flag (plus `--platform` or `--arch`) on
-  `oci import`, plus `--variant` (default `image`). `--upstream`
-  accepts the full OCI digest (`sha256:<hex>`) or a bare hex (assumed
-  sha256); non-sha256 algos are rejected at import — the store only
-  bridges that one.
+  `oci import`. `--upstream` accepts the full OCI digest (`sha256:<hex>`)
+  or a bare hex (assumed sha256); non-sha256 algos are rejected at import —
+  the store only bridges that one.
 - **Storage**: a plain name, like any other — one flat segment in the
   name index (the `/`s are escaped via the same `index.Encode` every
   registry-style name uses), resolved through the same name-index path

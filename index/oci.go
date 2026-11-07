@@ -16,32 +16,31 @@ import (
 // identifiers the store carries as labels, not things it resolves against.
 const OciPrefix = "oci"
 
-// OciVariants are the three values the variant component takes. Each names a
+// OciVariants are the values the variant component takes. Each names a
 // different *kind* of leaf for the same (upstream digest, platform), so they
 // are separate path components rather than one last-write-wins name:
 //
-//   - blob: the raw file bytes (the SIF, or a tar) — the --basepath target,
-//     produced by `add`.
-//   - image: an OCI image index (JSON) — the layout docker pull/save
-//     produces, produced by `oci import` of a multi-layer image.
-//   - artifact: an OCI artifact index (JSON) — the single-layer scaffold
-//     apptainer push / ORAS produce, from `oci import` of a bare file.
+//   - blob: a blob — the raw file bytes (a SIF, a tar, a layer, a config).
+//     The main purpose: serve a ready file to a client (apptainer's
+//     --basepath target). Determined by the input shape: `oci import` of a
+//     bare file records here.
+//   - json: the index/manifest JSON — the entrypoint a client (or `oci ls`)
+//     peeks at to discover what else a layout references. Secondary, for
+//     introspection. Determined by the input shape: `oci import` of a layout
+//     records here. An OCI "image" and an OCI "artifact" are the same
+//     structure (an image.index / image.manifest JSON), so they share this
+//     one value; the distinction is what the producer meant, not something
+//     the store can or should assert.
+//
+// The component is a naming convention the *writer* picks from the input
+// shape; the store itself never branches on it. The codec is always derived
+// from content (first byte), so a JSON leaf under blob/ or a raw leaf under
+// json/ still resolves and serves correctly — the directory name is metadata
+// for humans, not a claim the store enforces.
 const (
-	OciVariantBlob     = "blob"
-	OciVariantImage    = "image"
-	OciVariantArtifact = "artifact"
+	OciVariantBlob = "blob"
+	OciVariantJson = "json"
 )
-
-// OciVariantValid reports whether v is one of the known variant components.
-// Used by the write path; ParseOciRefName does not enforce it (the shape
-// allows any non-empty component, so a store could carry a new variant).
-func OciVariantValid(v string) bool {
-	switch v {
-	case OciVariantBlob, OciVariantImage, OciVariantArtifact:
-		return true
-	}
-	return false
-}
 
 // OciDigestAlgo is the only digest algorithm this store bridges (via
 // identity.FromOCI). Reference names record it as a path component, so the
@@ -72,8 +71,8 @@ func IsOciRef(nm string) bool {
 // This is a *shape* check for the resolver and the FUSE tree; it does not
 // reject an unknown variant or a non-sha256 algorithm (the shape allows any
 // non-empty components), so a store could carry a new variant or algorithm.
-// The write path (NormalizeOciDigest, OciVariantValid) is the gate that keeps
-// those closed today.
+// The write path (NormalizeOciDigest) is the gate that keeps the digest
+// closed today.
 //
 // ok is false for any shape that does not match exactly — the caller can then
 // treat the name as an ordinary free label.

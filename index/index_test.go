@@ -95,8 +95,7 @@ func TestIsOciRef(t *testing.T) {
 		want bool
 	}{
 		{"oci/blob/linux/amd64/sha256/3f4d", true},
-		{"oci/image/linux/amd64/sha256/3f4d", true},
-		{"oci/artifact/linux/amd64/sha256/3f4d", true},
+		{"oci/json/linux/amd64/sha256/3f4d", true},
 		{"oci/blob/linux", true}, // under the oci/ namespace (even if incomplete)
 		{"oci", false},           // the bare top dir, not a reference name
 		{"ocix/blob/linux/amd64/sha256/3f4d", false},
@@ -122,12 +121,12 @@ func TestParseOciRefName(t *testing.T) {
 		ok      bool
 	}{
 		{"oci/blob/linux/amd64/sha256/3f4d6b32", "blob", "linux", "amd64", "sha256", "3f4d6b32", true},
-		{"oci/image/linux/amd64/sha256/3f4d6b32", "image", "linux", "amd64", "sha256", "3f4d6b32", true},
-		{"oci/artifact/linux/arm64/sha256/abcdef", "artifact", "linux", "arm64", "sha256", "abcdef", true},
+		{"oci/json/linux/amd64/sha256/3f4d6b32", "json", "linux", "amd64", "sha256", "3f4d6b32", true},
+		{"oci/json/linux/arm64/sha256/abcdef", "json", "linux", "arm64", "sha256", "abcdef", true},
 		// os is just a component: windows is legal in the shape too (the write
 		// path's NormalizePlatform is the one that defaults to linux).
 		{"oci/blob/windows/amd64/sha256/deadbeef", "blob", "windows", "amd64", "sha256", "deadbeef", true},
-		{"oci/image/linux/amd64/sha512/abcdef", "image", "linux", "amd64", "sha512", "abcdef", true},
+		{"oci/json/linux/amd64/sha512/abcdef", "json", "linux", "amd64", "sha512", "abcdef", true},
 		// missing components (need exactly variant/os/arch/algo/hex)
 		{"oci/blob/linux/amd64/sha256", "blob", "linux", "amd64", "sha256", "", false},
 		{"oci/blob/linux/amd64", "", "", "", "", "", false},
@@ -169,25 +168,6 @@ func TestBuildOciName(t *testing.T) {
 	if v, o, a, al, h, ok := ParseOciRefName(want); !ok || v != "blob" || o != "linux" || a != "amd64" || al != "sha256" || h != "3f4d6b32" {
 		t.Errorf("round-trip ParseOciRefName(%q) = (%q, %q, %q, %q, %q, %v), want (blob, linux, amd64, sha256, 3f4d6b32, true)",
 			want, v, o, a, al, h, ok)
-	}
-}
-
-func TestOciVariantValid(t *testing.T) {
-	cases := []struct {
-		v    string
-		want bool
-	}{
-		{"blob", true},
-		{"image", true},
-		{"artifact", true},
-		{"", false},
-		{"sif", false},
-		{"BLOB", false}, // variant is case-sensitive
-	}
-	for _, tc := range cases {
-		if got := OciVariantValid(tc.v); got != tc.want {
-			t.Errorf("OciVariantValid(%q) = %v, want %v", tc.v, got, tc.want)
-		}
 	}
 }
 

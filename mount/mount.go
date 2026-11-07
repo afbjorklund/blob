@@ -479,7 +479,7 @@ func (h *blobHandle) Release(_ context.Context, _ *fuse.ReleaseRequest) error {
 //
 // The node is parameterised by the depth of the path walked so far:
 //
-//	level 0  = walking the variant components (blob / image / artifact)
+//	level 0  = walking the variant components (blob / json)
 //	level 1  = walking the os components
 //	level 2  = walking the arch components
 //	level 3  = walking the algo components

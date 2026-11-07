@@ -29,7 +29,6 @@ var (
 	ociUpstream string
 	ociPlatform string
 	ociArch     string
-	ociVariant  string
 )
 
 // storeSink adapts a ReadWrite backend to an oci.Sink, translating each OCI
@@ -475,15 +474,9 @@ func registerOCICmds(root *cobra.Command) {
 		RunE:    runOCIAdd,
 	}
 	addCmd.Flags().StringArrayVarP(&ociNames, "name", "", []string{}, "additional index name to record (repeatable); the basename of the argument is always recorded as well — for a layout pointing at its index, for a bare file pointing at the file's own bytes (the artifact's single layer, the same key `blob add` uses)")
-	addCmd.Flags().StringVar(&ociUpstream, "upstream", "", "the OCI multi-arch origin digest the image was pulled for (sha256:<hex> or a bare hex); when set, the import is additionally recorded under an oci/<variant>/<os>/<arch>/<algo>/<hex> name")
+	addCmd.Flags().StringVar(&ociUpstream, "upstream", "", "the OCI multi-arch origin digest the image was pulled for (sha256:<hex> or a bare hex); when set, the import is additionally recorded under an oci/<variant>/<os>/<arch>/<algo>/<hex> name (the variant follows the input shape: a bare file is blob, a layout is json)")
 	addCmd.Flags().StringVar(&ociPlatform, "platform", "", "platform the --upstream digest was pulled for (os/arch; e.g. linux/amd64); if unset, --arch (or the local arch) is implied under linux")
 	addCmd.Flags().StringVar(&ociArch, "arch", "", "arch the --upstream digest was pulled for; a shortcut for --platform linux/<arch>; if unset, the local arch is implied under linux")
-	// --variant is what the OCI leaf names. For a layout (dir or archive) it
-	// must be "image" or "artifact" — the *shape* of the layout (docker
-	// pull/save produces the former, ORAS / apptainer push the latter) and
-	// not something the store can sniff. For a bare file it is "blob"; the
-	// flag is ignored in that case (the variant follows the input shape).
-	addCmd.Flags().StringVar(&ociVariant, "variant", index.OciVariantImage, "what the OCI leaf names for a layout import: image (default) or artifact; for a bare file it is always blob")
 
 	getCmd := &cobra.Command{
 		Use:     "export <cid|name|digest> -o <dir | tar>",
@@ -576,14 +569,16 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 	// the shape is built in index/ so both verbs produce byte-identical
 	// names.
 	//
-	// A bare-file import is always a "blob" variant: the leaf names the
-	// file's own bytes, not an OCI index. That decision is implicit in the
-	// input shape and not overridable — a bare file *is* a blob, full stop.
-	// For a layout the --variant flag (image/artifact) applies unchanged.
-	if ociUpstream != "" && nameTarget != "" {
-		ociVariant = index.OciVariantBlob
+	// The variant follows the input shape, not a flag: a bare-file import is
+	// a "blob" (the leaf names the file's own bytes), a layout import is a
+	// "json" (the leaf is the OCI index / its manifest). An OCI image and an
+	// OCI artifact are the same JSON structure, so they share the one "json"
+	// value — there is nothing for a flag to choose.
+	variant := index.OciVariantJson
+	if nameTarget != "" {
+		variant = index.OciVariantBlob
 	}
-	ref, refOK, refErr := ociRefName()
+	ref, refOK, refErr := ociRefName(variant)
 	if refErr != nil {
 		return refErr
 	}

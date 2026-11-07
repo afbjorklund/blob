@@ -314,13 +314,15 @@ oci/<variant>/<os>/<arch>/<algo>/<hex>
 - `<algo>` is `sha256` (the only digest the store bridges); it is a path
   component, not a `sha256:`-prefixed filename, so the shape can grow
   (sha512, ...) without a rename.
-- `<variant>` is what the leaf names: `blob` (the raw file bytes —
-  `oci import <bare-file>`), `image` (an OCI image index JSON —
-  `oci import <layout>`), or `artifact` (an OCI artifact index JSON —
-  `oci import <layout> --variant artifact`). A bare file is *always* a
-  `blob`; `--variant` is ignored for it. The two JSON variants
-  are indistinguishable by sniffing (both are an OCI index), so the user
-  declares which one they imported.
+- `<variant>` is what the leaf names: `blob` (a blob — the raw file bytes,
+  a SIF, a tar, a layer, or a config — the client's `--basepath` target) or
+  `json` (the OCI index / manifest — the entrypoint `oci ls` and a client
+  peek at to discover what else the layout references). It is not a flag: it
+  follows the input shape, and is set automatically — a bare file is always
+  `blob`, a layout always `json`. An OCI "image" and an OCI "artifact" are
+  the same JSON structure (both an image.index / image.manifest), so they
+  share the one `json` value; the distinction is what the producer meant,
+  not something the store can or should assert.
 
 The record is a *name* — a flat index entry that resolves to a content
 CID — and it can be looked up like any other (`get`, `cat`, `lookup`, or
@@ -331,13 +333,14 @@ but are different stored blobs).
 
 ```bash
 B=sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
-# a SIF built for amd64 (variant is implicit: bare file => blob)
+# a SIF built for amd64 (bare file => blob)
 blob oci import busybox.sif      --upstream "$B" --arch amd64
 blob oci import busybox-arm.sif  --upstream "$B" --arch arm64
-# the OCI image layout for amd64 (variant is image by default)
+# the OCI layout for amd64 (layout => json)
 blob oci import busybox.tgz --upstream "$B" --arch amd64
 # resolve any of them back to a CID
 blob lookup oci/blob/linux/amd64/sha256/a46257e0...
+blob lookup oci/json/linux/amd64/sha256/a46257e0...
 cat mount/oci/blob/linux/amd64/sha256/a46257e0...
 ```
 

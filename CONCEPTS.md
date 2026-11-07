@@ -246,9 +246,9 @@ container ecosystem:
   store holds (it is the hash of an index we do not store, re-saved with
   different bytes). Two arches, a SIF, and an OCI layout can all descend
   from the same upstream digest, so they are disambiguated by shape of
-  their own — `oci/<variant>/<os>/<arch>/<algo>/<hex>` — where the
-  variant (blob for a raw file, image or artifact for an OCI layout) is
-  part of the name. Recorded as a plain name (one flat segment under the
+   their own — `oci/<variant>/<os>/<arch>/<algo>/<hex>` — where the
+   variant (blob for a raw file, json for an OCI layout) is part of the
+   name. Recorded as a plain name (one flat segment under the
   index) and projected as a 5-level directory tree under the FUSE mount,
   with the leaf a symlink to the stored blob.
 

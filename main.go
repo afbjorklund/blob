@@ -85,23 +85,17 @@ func defaultS3Region() string {
 }
 
 // ociRefName returns the canonical "oci/<variant>/<os>/<arch>/<algo>/<hex>"
-// name for the --upstream/--platform/--arch/--variant flags of `oci import`,
-// or false when the import was not recorded with an origin reference. It is
-// the single point where the flags combine into the record shape.
-func ociRefName() (ref string, ok bool, err error) {
+// name for the --upstream/--platform/--arch flags of `oci import`, or false
+// when the import was not recorded with an origin reference. The variant is
+// a parameter (caller-derived from the input shape — a bare file is blob, a
+// layout is json), not a flag. It is the single point where the flags combine
+// into the record shape.
+func ociRefName(variant string) (ref string, ok bool, err error) {
 	if ociUpstream == "" {
 		return "", false, nil
 	}
-	if ociVariant == "" {
-		// A caller that sets --upstream but not --variant is asking for an
-		// origin reference without declaring what the leaf names: a bare file
-		// is "blob", a layout import "image" (or "artifact" by flag). That
-		// default is set by the verb before this is called, so a non-empty
-		// variant is expected.
-		return "", false, fmt.Errorf("--upstream requires --variant (one of: blob, image, artifact)")
-	}
-	if !index.OciVariantValid(ociVariant) {
-		return "", false, fmt.Errorf("invalid --variant %q (one of: blob, image, artifact)", ociVariant)
+	if variant == "" {
+		return "", false, fmt.Errorf("internal: no variant for an origin reference")
 	}
 	algo, hexv, err := index.NormalizeOciDigest(ociUpstream)
 	if err != nil {
@@ -111,7 +105,7 @@ func ociRefName() (ref string, ok bool, err error) {
 	if err != nil {
 		return "", false, fmt.Errorf("--platform/--arch: %w", err)
 	}
-	return index.BuildOciName(ociVariant, osName, arch, algo, hexv), true, nil
+	return index.BuildOciName(variant, osName, arch, algo, hexv), true, nil
 }
 
 // resolveOciPlatform combines --platform and --arch: --platform (os/arch)

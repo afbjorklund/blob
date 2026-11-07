@@ -257,7 +257,7 @@ func TestOciSurfaceListing(t *testing.T) {
 	amt := ociChild(t, lt, "amd64")
 	sht := ociChild(t, amt, "sha256")
 	cases := []lvl{
-		{ot, "oci/", []string{"blob", "image"}},
+		{ot, "oci/", []string{"blob", "json"}},
 		{bt, "oci/blob/", []string{"linux"}},
 		{lt, "oci/blob/linux/", []string{"amd64", "arm64"}},
 		{amt, "oci/blob/linux/amd64/", []string{"sha256"}},
@@ -313,7 +313,7 @@ func TestOciSurfaceLeaves(t *testing.T) {
 	cases := []tc{
 		{[]string{"blob", "linux", "amd64", "sha256", idx}, wantCID(t, keys.amdBlob, keys.mkBlob)},
 		{[]string{"blob", "linux", "arm64", "sha256", idx}, wantCID(t, keys.armBlob, keys.mkArm)},
-		{[]string{"image", "linux", "amd64", "sha256", idx}, wantCID(t, keys.amdIdx, keys.mkIdx)},
+		{[]string{"json", "linux", "amd64", "sha256", idx}, wantCID(t, keys.amdIdx, keys.mkIdx)},
 	}
 	_ = m
 	for _, c := range cases {
@@ -334,7 +334,7 @@ func TestOciSurfaceLeaves(t *testing.T) {
 }
 
 // ociSurfaceSetup returns a mem store pre-populated with the three standard
-// reference names (blob/amd64, blob/arm64, image/amd64, all under the same
+// reference names (blob/amd64, blob/arm64, json/amd64, all under the same
 // origin digest), plus the top-level ociTree and the keys/payloads for the
 // three stored blobs (so tests can derive the expected CIDs).
 func ociSurfaceSetup(t *testing.T) (*mem, *ociTree, struct {
@@ -353,7 +353,7 @@ func ociSurfaceSetup(t *testing.T) (*mem, *ociTree, struct {
 	}{
 		{"oci/blob/linux/amd64/sha256/" + idx, mkBlob},
 		{"oci/blob/linux/arm64/sha256/" + idx, mkArm},
-		{"oci/image/linux/amd64/sha256/" + idx, mkIdx},
+		{"oci/json/linux/amd64/sha256/" + idx, mkIdx},
 	} {
 		if err := m.Index(pair.nm, pair.dgst); err != nil {
 			t.Fatalf("Index(%q): %v", pair.nm, err)
