@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"sort"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -126,8 +127,8 @@ func (m *mem) Close() error { return nil }
 
 var _ storage.StorageBackend = (*mem)(nil)
 
-// TestRootShape checks the fixed skeleton: the root lists exactly name/ and
-// blob/ (both directories), each reachable by Lookup, unknown entries ENOENT.
+// TestRootShape checks the fixed skeleton: the root lists exactly name/, blob/
+// and oci/ (all directories), each reachable by Lookup, unknown entries ENOENT.
 func TestRootShape(t *testing.T) {
 	f := New(newMem())
 	root, err := f.Root()
@@ -147,8 +148,8 @@ func TestRootShape(t *testing.T) {
 			t.Fatalf("top-level %q type = %v, want DT_Dir", d.Name, d.Type)
 		}
 	}
-	if len(names) != 2 || names[0] != "name" || names[1] != "blob" {
-		t.Fatalf("top-level = %v, want [name blob]", names)
+	if len(names) != 3 || names[0] != "name" || names[1] != "blob" || names[2] != "oci" {
+		t.Fatalf("top-level = %v, want [name blob oci]", names)
 	}
 
 	nd, err := r.Lookup(ctx, "name")
@@ -164,6 +165,13 @@ func TestRootShape(t *testing.T) {
 	}
 	if _, ok := bdn.(*blobDir); !ok {
 		t.Fatalf("Lookup(blob) = %T, want *blobDir", bdn)
+	}
+	odn, err := r.Lookup(ctx, "oci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := odn.(*ociTree); !ok {
+		t.Fatalf("Lookup(oci) = %T, want *ociTree", odn)
 	}
 	if _, err := r.Lookup(ctx, "nope"); !isEnoent(err) {
 		t.Fatalf("Lookup(nope) err = %v, want ENOENT", err)
@@ -227,6 +235,119 @@ func TestNameSurface(t *testing.T) {
 
 	if _, err := ndir.Lookup(ctx, "no/such/name"); !isEnoent(err) {
 		t.Fatalf("Lookup(name/no-such) err = %v, want ENOENT", err)
+	}
+}
+
+// TestOciSurface checks the oci/ tree: it lists the recorded upstream-reference
+// names (in the shape oci/<os>/<arch>/<algo>/<hex>) level by level, each leaf
+// being a symlink to ../blob/<derived-CID>, and unknown shapes resolve to ENOENT.
+// Two arches under the same index digest may coexist — the whole point of the
+// arch directory — and each points to its own blob.
+func TestOciSurface(t *testing.T) {
+	m := newMem()
+	amdBlob := []byte(`{"build":"amd64"}`)
+	armBlob := []byte(`{"build":"arm64"}`)
+	amk := m.store(t, "alpine-amd.sif", amdBlob)
+	arK := m.store(t, "alpine-arm.sif", armBlob)
+	const idx = "3f4d6b32e26703c6"
+	if err := m.Index("oci/linux/amd64/sha256/"+idx, amk); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Index("oci/linux/arm64/sha256/"+idx, arK); err != nil {
+		t.Fatal(err)
+	}
+
+	f := New(m)
+	root, _ := f.Root()
+	ociNode, err := root.(*rootNode).Lookup(ctx, "oci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ot := ociNode.(*ociTree)
+
+	// Level 0: one distinct os
+	osList, err := ot.ReadDirAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(osList) != 1 || osList[0].Name != "linux" || osList[0].Type != fuse.DT_Dir {
+		t.Fatalf("oci/ listing = %v, want [linux] (DT_Dir)", osList)
+	}
+
+	// Level 1: two arches under linux
+	linuxNode, _ := ot.Lookup(ctx, "linux")
+	lt := linuxNode.(*ociTree)
+	archList, err := lt.ReadDirAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, e := range archList {
+		got[e.Name] = true
+		if e.Type != fuse.DT_Dir {
+			t.Fatalf("oci/linux/%s type = %v, want DT_Dir", e.Name, e.Type)
+		}
+	}
+	if !got["amd64"] || !got["arm64"] || len(archList) != 2 {
+		t.Fatalf("oci/linux/ listing = %v, want [amd64 arm64]", archList)
+	}
+
+	// Level 2: one algo under each arch
+	amdNode, _ := lt.Lookup(ctx, "amd64")
+	amt := amdNode.(*ociTree)
+	algoList, _ := amt.ReadDirAll(ctx)
+	if len(algoList) != 1 || algoList[0].Name != "sha256" {
+		t.Fatalf("oci/linux/amd64/ listing = %v, want [sha256]", algoList)
+	}
+
+	// Level 3: the hex leaf (DT_Link)
+	shaNode, _ := amt.Lookup(ctx, "sha256")
+	sht := shaNode.(*ociTree)
+	hexList, _ := sht.ReadDirAll(ctx)
+	if len(hexList) != 1 || hexList[0].Name != idx || hexList[0].Type != fuse.DT_Link {
+		t.Fatalf("oci/linux/amd64/sha256/ listing = %v, want [%s] (DT_Link)", hexList, idx)
+	}
+
+	// The leaf is a symlink to the right blob (the amd64 one).
+	leaf, _ := sht.Lookup(ctx, idx)
+	link, ok := leaf.(*nameLink)
+	if !ok {
+		t.Fatalf("leaf = %T, want *nameLink", leaf)
+	}
+	gotTarget, err := link.Readlink(ctx, &fuse.ReadlinkRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Target depth: the leaf lives 5 levels below the mount root
+	// (oci/<os>/<arch>/<algo>/<hex>), so 4 "../" hops from its parent
+	// back to the root, then blob/<CID>.
+	wantTarget := strings.Repeat("../", 4) + "blob/" + wantCID(t, amdBlob, amk)
+	if gotTarget != wantTarget {
+		t.Fatalf("readlink oci/linux/amd64/sha256/%s = %q, want %q", idx, gotTarget, wantTarget)
+	}
+
+	// Same index digest, different arch, different blob.
+	armNode, _ := lt.Lookup(ctx, "arm64")
+	art := armNode.(*ociTree)
+	aSha, _ := art.Lookup(ctx, "sha256")
+	aSht := aSha.(*ociTree)
+	aLeaf, _ := aSht.Lookup(ctx, idx)
+	aLink, ok := aLeaf.(*nameLink)
+	if !ok {
+		t.Fatalf("arm leaf = %T, want *nameLink", aLeaf)
+	}
+	aTarget, err := aLink.Readlink(ctx, &fuse.ReadlinkRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantA := strings.Repeat("../", 4) + "blob/" + wantCID(t, armBlob, arK)
+	if aTarget != wantA {
+		t.Fatalf("readlink oci/linux/arm64/sha256/%s = %q, want %q", idx, aTarget, wantA)
+	}
+
+	// Unknown leaf: not recorded in the name table → ENOENT at the leaf.
+	if _, err := sht.Lookup(ctx, "XYZXZYX"); !isEnoent(err) {
+		t.Fatalf("Lookup(leaf XYZXZYX): err = %v, want ENOENT", err)
 	}
 }
 

@@ -46,6 +46,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -54,6 +55,7 @@ import (
 	"bazil.org/fuse/fs"
 
 	"blob/cid"
+	"blob/index"
 	"blob/storage"
 )
 
@@ -127,6 +129,7 @@ var (
 	_ fs.Node           = (*blobDir)(nil)
 	_ fs.Node           = (*nameLink)(nil)
 	_ fs.Node           = (*blobFile)(nil)
+	_ fs.Node           = (*ociTree)(nil)
 	_ fs.NodeOpener     = (*blobFile)(nil)
 	_ fs.Handle         = (*blobHandle)(nil)
 	_ fs.HandleReader   = (*blobHandle)(nil)
@@ -148,6 +151,7 @@ func (n *rootNode) ReadDirAll(_ context.Context) ([]fuse.Dirent, error) {
 	return []fuse.Dirent{
 		{Name: "name", Type: fuse.DT_Dir},
 		{Name: "blob", Type: fuse.DT_Dir},
+		{Name: "oci", Type: fuse.DT_Dir},
 	}, nil
 }
 
@@ -157,6 +161,8 @@ func (n *rootNode) Lookup(_ context.Context, name string) (fs.Node, error) {
 		return &nameDir{fs: n.fs}, nil
 	case "blob":
 		return &blobDir{fs: n.fs}, nil
+	case "oci":
+		return &ociTree{fs: n.fs, level: 0}, nil
 	default:
 		return nil, syscall.ENOENT
 	}
@@ -444,4 +450,125 @@ func (h *blobHandle) Release(_ context.Context, _ *fuse.ReleaseRequest) error {
 		}
 	}
 	return nil
+}
+
+// ociTree is the upstream-reference surface: a 5-level projection of the
+// name index restricted to names of the shape "oci/<os>/<arch>/<algo>/<hex>".
+// The top three levels (os / arch / algo) are directories; the leaf is a
+// symlink (a nameLink) to the blob's canonical path, exactly like the
+// entries under name/.
+//
+// The node is parameterised by the depth of the path walked so far:
+//
+//	level 0  = walking the os components
+//	level 1  = walking the arch components
+//	level 2  = walking the algo components
+//	level 3  = walking the hex leaves (symlinks)
+//
+// The target of each name is derived the same way nameDir.Lookup does
+// (backend.Lookup for the key, backend.Peek for the first-byte codec,
+// cid.Build + cid.Render). No bytes of the content are touched on the
+// stat/lookup path, so a name may point at a multi-GB blob and its entry
+// still stats and lists in constant time.
+type ociTree struct {
+	fs     *FS
+	level  int
+	walked []string
+}
+
+func (n *ociTree) Attr(ctx context.Context, a *fuse.Attr) error {
+	a.Mode = os.ModeDir | 0o555
+	return nil
+}
+
+// ReadDirAll lists the distinct values of the current component (level)
+// across all recorded names of the right shape under the walked prefix.
+// Names that do not parse as a well-formed oci/ reference are not in this
+// surface; they are owned by name/ (see index.IsOciRef).
+func (n *ociTree) ReadDirAll(_ context.Context) ([]fuse.Dirent, error) {
+	names, err := n.fs.backend.Names()
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	out := []fuse.Dirent{}
+	for _, nm := range names {
+		os_, arch, algo, hex, ok := index.ParseOciRefName(nm)
+		if !ok {
+			continue
+		}
+		components := []string{os_, arch, algo, hex}
+		if n.level >= len(components) {
+			continue
+		}
+		// The walked prefix must match this name's leading components: the
+		// tree walks in the order os, arch, algo, hex.
+		if n.level > 0 {
+			want := index.OciPrefix + "/" + strings.Join(components[:n.level], "/")
+			if want != index.OciPrefix+"/"+strings.Join(n.walked, "/") {
+				continue
+			}
+		}
+		cur := components[n.level]
+		if seen[cur] {
+			continue
+		}
+		seen[cur] = true
+		t := fuse.DT_Dir
+		if n.level == 3 {
+			t = fuse.DT_Link
+		}
+		out = append(out, fuse.Dirent{Name: cur, Type: t})
+	}
+	return out, nil
+}
+
+// Lookup resolves the next component (at the current level) to either an
+// inner ociTree one level deeper (level < 3) or a nameLink leaf pointing at
+// the blob's canonical path (level == 3). The full canonical name is
+// "oci/" + the walked components, joined by "/" and recorded as a single
+// flat segment under index.Encode.
+func (n *ociTree) Lookup(_ context.Context, name string) (fs.Node, error) {
+	if n.level > 3 {
+		return nil, syscall.ENOENT
+	}
+	newWalked := append(append([]string{}, n.walked...), name)
+
+	if n.level < 3 {
+		return &ociTree{fs: n.fs, level: n.level + 1, walked: newWalked}, nil
+	}
+
+	full := index.BuildOciName(newWalked[0], newWalked[1], newWalked[2], newWalked[3])
+	// Defensive re-parse: the tree already filters to well-formed shapes in
+	// ReadDirAll, but a caller may walk directly — verify the shape before
+	// we consult the name table (a malformed hex, an extra component, etc.
+	// is not this surface's).
+	if _, _, _, _, ok := index.ParseOciRefName(full); !ok {
+		return nil, syscall.ENOENT
+	}
+
+	be := n.fs.backend
+	key, err := be.Lookup(full)
+	if err != nil {
+		return nil, syscall.ENOENT
+	}
+	var first byte
+	hdr, perr := be.Peek(key, 1)
+	if perr != nil && !errors.Is(perr, io.EOF) {
+		return nil, perr
+	}
+	if len(hdr) > 0 {
+		first = hdr[0]
+	}
+	c := cid.Build(cid.CodecForFirstByte(first), key)
+	cidStr, rerr := cid.Render(c)
+	if rerr != nil {
+		return nil, rerr
+	}
+	// Target is relative to the leaf's directory: the leaf at depth 5 (oci +
+	// os + arch + algo + hex under the root) needs 5 - 1 = 4 "../" hops to
+	// climb back to the root, then down into "blob/<CID>" — the same shape
+	// name/ uses (one "../" to climb from depth 1 to depth 0).
+	target := strings.Repeat("../", 4) + "blob/" + cidStr
+	return &nameLink{target: target}, nil
 }

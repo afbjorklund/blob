@@ -89,6 +89,162 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+func TestIsOciRef(t *testing.T) {
+	cases := []struct {
+		nm   string
+		want bool
+	}{
+		{"oci/linux/amd64/sha256/3f4d", true},
+		{"oci/linux", true},
+		{"oci", true},
+		{"ocix/linux/amd64/sha256/3f4d", false},
+		{"docker.io/library/busybox", false},
+		{"alpine.sif", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := IsOciRef(tc.nm); got != tc.want {
+			t.Errorf("IsOciRef(%q) = %v, want %v", tc.nm, got, tc.want)
+		}
+	}
+}
+
+func TestParseOciRefName(t *testing.T) {
+	cases := []struct {
+		nm   string
+		os   string
+		arch string
+		algo string
+		hex  string
+		ok   bool
+	}{
+		{"oci/linux/amd64/sha256/3f4d6b32", "linux", "amd64", "sha256", "3f4d6b32", true},
+		{"oci/linux/arm64/sha256/abcdef", "linux", "arm64", "sha256", "abcdef", true},
+		// os is just a component: windows is legal in the shape too (the write
+		// path's NormalizePlatform is the one that defaults to linux; the name
+		// shape itself allows any os string).
+		{"oci/windows/amd64/sha256/deadbeef", "windows", "amd64", "sha256", "deadbeef", true},
+		{"oci/linux/amd64/sha512/abcdef", "linux", "amd64", "sha512", "abcdef", true},
+		// missing components
+		{"oci/linux/amd64/sha256", "", "", "", "", false},
+		{"oci/linux/amd64", "", "", "", "", false},
+		{"oci/linux", "", "", "", "", false},
+		{"oci", "", "", "", "", false},
+		// uppercase hex is not the canonical form (the write path lowercases)
+		{"oci/linux/amd64/sha256/ABCDEF", "", "", "", "", false},
+		// non-hex
+		{"oci/linux/amd64/sha256/gg", "", "", "", "", false},
+		{"oci/linux/amd64/sha256/3f4d:6b", "", "", "", "", false},
+		// not an oci name at all
+		{"busybox", "", "", "", "", false},
+		{"ociX/linux/amd64/sha256/3f4d", "", "", "", "", false},
+	}
+	for _, tc := range cases {
+		gotOS, gotArch, gotAlgo, gotHex, ok := ParseOciRefName(tc.nm)
+		if ok != tc.ok {
+			t.Errorf("ParseOciRefName(%q) ok = %v, want %v", tc.nm, ok, tc.ok)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if gotOS != tc.os || gotArch != tc.arch || gotAlgo != tc.algo || gotHex != tc.hex {
+			t.Errorf("ParseOciRefName(%q) = (%q, %q, %q, %q), want (%q, %q, %q, %q)",
+				tc.nm, gotOS, gotArch, gotAlgo, gotHex, tc.os, tc.arch, tc.algo, tc.hex)
+		}
+	}
+}
+
+func TestBuildOciName(t *testing.T) {
+	got := BuildOciName("linux", "amd64", "sha256", "3f4d6b32")
+	want := "oci/linux/amd64/sha256/3f4d6b32"
+	if got != want {
+		t.Errorf("BuildOciName = %q, want %q", got, want)
+	}
+	// round-trip through ParseOciRefName
+	if o, a, al, h, ok := ParseOciRefName(want); !ok || o != "linux" || a != "amd64" || al != "sha256" || h != "3f4d6b32" {
+		t.Errorf("round-trip ParseOciRefName(%q) = (%q, %q, %q, %q, %v), want (linux, amd64, sha256, 3f4d6b32, true)",
+			want, o, a, al, h, ok)
+	}
+}
+
+func TestNormalizeOciDigest(t *testing.T) {
+	cases := []struct {
+		in      string
+		algo    string
+		hex     string
+		wantErr bool
+	}{
+		{"sha256:3f4d6b32e267", "sha256", "3f4d6b32e267", false},
+		{"sha256:ABCDEF", "sha256", "abcdef", false},      // upper-case lowercased
+		{"3f4d6b32e267", "sha256", "3f4d6b32e267", false}, // bare hex → sha256 assumed
+		{"SHA256:abcdef", "sha256", "abcdef", false},      // upper-case algo lowercased
+		{"sha512:abcdef", "", "", true},                   // not sha256 — rejected
+		{"md5:abcdef", "", "", true},                      // not sha256 — rejected
+		{"sha256:", "", "", true},                         // empty hex — rejected
+		{":abcdef", "", "", true},                         // empty algo — rejected
+		{"sha256:gh", "", "", true},                       // non-hex — rejected
+		{"", "", "", true},                                // empty — rejected
+	}
+	for _, tc := range cases {
+		algo, hex, err := NormalizeOciDigest(tc.in)
+		switch {
+		case tc.wantErr && err == nil:
+			t.Errorf("NormalizeOciDigest(%q) = (%q, %q, nil), want error", tc.in, algo, hex)
+		case !tc.wantErr && err != nil:
+			t.Errorf("NormalizeOciDigest(%q) = (%q, %q, %v), want (%q, %q, nil)", tc.in, algo, hex, err, tc.algo, tc.hex)
+		case !tc.wantErr && (algo != tc.algo || hex != tc.hex):
+			t.Errorf("NormalizeOciDigest(%q) = (%q, %q), want (%q, %q)", tc.in, algo, hex, tc.algo, tc.hex)
+		}
+	}
+}
+
+func TestNormalizePlatform(t *testing.T) {
+	cases := []struct {
+		in      string
+		os      string
+		arch    string
+		wantErr bool
+	}{
+		{"linux/amd64", "linux", "amd64", false},
+		{"linux/arm64", "linux", "arm64", false},
+		{"amd64", "linux", "amd64", false}, // bare arch → linux assumed
+		{"arm64", "linux", "arm64", false},
+		{"windows/amd64", "windows", "amd64", false}, // non-linux: shape allows it
+		{"", "", "", true},
+		{"/amd64", "", "", true}, // empty os
+		{"linux/", "", "", true}, // empty arch
+	}
+	for _, tc := range cases {
+		os, arch, err := NormalizePlatform(tc.in)
+		switch {
+		case tc.wantErr && err == nil:
+			t.Errorf("NormalizePlatform(%q) = (%q, %q, nil), want error", tc.in, os, arch)
+		case !tc.wantErr && err != nil:
+			t.Errorf("NormalizePlatform(%q) = (%q, %q, %v), want (%q, %q, nil)", tc.in, os, arch, err, tc.os, tc.arch)
+		case !tc.wantErr && (os != tc.os || arch != tc.arch):
+			t.Errorf("NormalizePlatform(%q) = (%q, %q), want (%q, %q)", tc.in, os, arch, tc.os, tc.arch)
+		}
+	}
+}
+
+func TestCheckOciRefName(t *testing.T) {
+	// An oci/ reference is a *name*, not a direct handle: index.Check must not
+	// intercept it (digest.Parse and cid.Parse both fail on the oci/ shape)
+	// and must not skip it (it never matches a blob's own multihash). This is
+	// why the composite can be recorded freely for any target — the
+	// "tolerate the missing upstream index" case we deliberately accept.
+	abc := keyFor(t, []byte("abc"))
+	name := BuildOciName("linux", "amd64", "sha256", "3f4d6b32")
+	got, err := Check(name, abc)
+	if err != nil {
+		t.Errorf("Check(%q, abc): %v; want (false, nil)", name, err)
+	}
+	if got {
+		t.Errorf("Check(%q, abc) skip = true; want false (record it)", name)
+	}
+}
+
 func TestEncode(t *testing.T) {
 	cases := []struct {
 		nm   string

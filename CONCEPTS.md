@@ -241,6 +241,15 @@ container ecosystem:
   single-key write, no read-modify-write of a shared document). Same idea,
   same direction (name → content → set of blobs), different scale of
   mutation.
+- **Multiarch registry digest** ≈ `blob`'s name index *with* the OS and
+  arch in the name. The digest of a multiarch image is an identifier but
+  does not name a content address the store holds (it is the hash of an
+  index we do not store). Two arches sharing an upstream digest collide
+  on the same registry name, so they are disambiguated by a shape of
+  their own — `oci/<os>/<arch>/<algo>/<hex>` — recorded as a plain name
+  (one flat segment under the index) and also projected as a 5-level
+  directory tree under the FUSE mount, with the leaf being a symlink to
+  the stored blob.
 
 So `blob` is not an "OCI store" — it is a *blob store that happens to speak
 OCI on the wire*. That means:

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -44,6 +45,12 @@ var (
 	httpPass    string
 	// OCI import/export
 	ociNames []string
+
+	// OCI upstream reference: record the blob under an
+	// "oci/<os>/<arch>/<algo>/<hex>" name (the multi-arch provenance ref).
+	ociUpstream string
+	ociPlatform string
+	ociArch     string
 
 	// cid
 	cidBase string
@@ -81,6 +88,40 @@ func defaultS3Bucket() string {
 // answer — see BACKEND.md).
 func defaultS3Region() string {
 	return os.Getenv("BLOB_S3_REGION")
+}
+
+// ociRefName returns the canonical "oci/<os>/<arch>/sha256/<hex>" name for the
+// --upstream/--platform/--arch flags, or false when the blob was not recorded
+// with an upstream reference. It is the single point where the three flags
+// combine into the record shape, so `add` and `oci import` share it and never
+// drift.
+func ociRefName() (ref string, ok bool, err error) {
+	if ociUpstream == "" {
+		return "", false, nil
+	}
+	algo, hexv, err := index.NormalizeOciDigest(ociUpstream)
+	if err != nil {
+		return "", false, fmt.Errorf("--upstream: %w", err)
+	}
+	osName, arch, err := resolveOciPlatform()
+	if err != nil {
+		return "", false, fmt.Errorf("--platform/--arch: %w", err)
+	}
+	return index.BuildOciName(osName, arch, algo, hexv), true, nil
+}
+
+// resolveOciPlatform combines --platform and --arch: --platform (os/arch)
+// wins if set, then --arch (which implies the linux OS), then the local
+// architecture under linux — the "user gives a digest and an implicit arch"
+// case.
+func resolveOciPlatform() (string, string, error) {
+	if ociPlatform != "" {
+		return index.NormalizePlatform(ociPlatform)
+	}
+	if ociArch != "" {
+		return "linux", ociArch, nil
+	}
+	return "linux", runtime.GOARCH, nil
 }
 
 // resolveCLIAuth decides which Basic-auth credentials (if any) the http backend
@@ -233,6 +274,9 @@ func main() {
 	}
 
 	addCmd.Flags().BoolVarP(&hashOnly, "only-hash", "n", false, "only compute and print the hash, do not store")
+	addCmd.Flags().StringVar(&ociUpstream, "upstream", "", "upstream OCI image-index digest the blob came from (sha256:<hex> or bare hex); when set, the blob is additionally recorded under an oci/<os>/<arch>/<algo>/<hex> name")
+	addCmd.Flags().StringVar(&ociPlatform, "platform", "", "platform the --upstream digest was pulled for (os/arch; e.g. linux/amd64); if unset, --arch (or the local arch) is implied under linux")
+	addCmd.Flags().StringVar(&ociArch, "arch", "", "arch the --upstream digest was pulled for; a shortcut for --platform linux/<arch>; if unset, the local arch (linux/"+runtime.GOARCH+") is implied")
 
 	rootCmd.AddCommand(addCmd)
 
@@ -497,13 +541,44 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Optionally record the OCI upstream reference name as well. It is a
+	// plain name for the store (one flat segment under Encode) and never
+	// shadows the baseline name: the two address the same blob key for this
+	// add, but a name recorded under one and not the other stays visible
+	// under its own spelling.
+	ref, ok, refErr := ociRefName()
+	if refErr != nil {
+		return refErr
+	}
+	if ok {
+		if _, cerr := index.Check(ref, digest); cerr != nil {
+			return cerr
+		}
+		if err := backend.Index(ref, digest); err != nil {
+			return err
+		}
+	}
+
 	if has {
-		fmt.Printf("File already exists in store: %s\n", cidStr)
+		if ok {
+			fmt.Printf("File already exists in store: %s (also recorded %s)\n", cidStr, ref)
+		} else {
+			fmt.Printf("File already exists in store: %s\n", cidStr)
+		}
 		return nil
 	}
 
 	if skip {
-		fmt.Printf("Added: %s (name %q skipped: it is already the blob's own digest handle)\n", cidStr, name)
+		if ok {
+			fmt.Printf("Added: %s (name %q skipped: it is already the blob's own digest handle; recorded %s)\n", cidStr, name, ref)
+		} else {
+			fmt.Printf("Added: %s (name %q skipped: it is already the blob's own digest handle)\n", cidStr, name)
+		}
+		return nil
+	}
+
+	if ok {
+		fmt.Printf("Added: %s (also recorded %s)\n", cidStr, ref)
 		return nil
 	}
 

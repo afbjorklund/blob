@@ -466,6 +466,9 @@ func registerOCICmds(root *cobra.Command) {
 		RunE:    runOCIAdd,
 	}
 	addCmd.Flags().StringArrayVarP(&ociNames, "name", "", []string{}, "additional index name to record (repeatable); the basename of the argument is always recorded as well — for a layout pointing at its index, for a bare file pointing at the file's own bytes (the artifact's single layer, the same key `blob add` uses)")
+	addCmd.Flags().StringVar(&ociUpstream, "upstream", "", "upstream OCI image-index digest the image came from (sha256:<hex> or bare hex); when set, the imported image is additionally recorded under an oci/<os>/<arch>/<algo>/<hex> name")
+	addCmd.Flags().StringVar(&ociPlatform, "platform", "", "platform the --upstream digest was pulled for (os/arch); if unset, --arch (or the local arch) is implied under linux")
+	addCmd.Flags().StringVar(&ociArch, "arch", "", "arch the --upstream digest was pulled for; a shortcut for --platform linux/<arch>")
 
 	getCmd := &cobra.Command{
 		Use:     "export <cid|name|digest> -o <dir | tar>",
@@ -550,7 +553,24 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	records, skipped, err := recordNames(base, ociNames, nameKey, backend)
+	// Optionally record the OCI upstream reference name (oci/<os>/<arch>/
+	// sha256/<hex>) alongside. It is a plain name for the store (one flat
+	// segment under Encode) and never shadows the baseline name: both address
+	// the same key for this import, but each stays visible under its own
+	// spelling. The flags live in package main (shared with `add`), and the
+	// shape is built in index/ so both verbs produce byte-identical names.
+	ref, refOK, refErr := ociRefName()
+	if refErr != nil {
+		return refErr
+	}
+	var extras []string
+	if refOK {
+		extras = append(append([]string{}, ociNames...), ref)
+	} else {
+		extras = ociNames
+	}
+
+	records, skipped, err := recordNames(base, extras, nameKey, backend)
 	if err != nil {
 		return err
 	}

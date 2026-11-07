@@ -199,6 +199,43 @@ is the content, and the content decides the CID. The user may re-map a
 is the non-mutable reference**, and the label remains a mutable alias
 the user is free to remap.
 
+## Multiarch references as names
+
+The same multiarch liberty has a second face: the *registry* digest for
+a multiarch image is an identifier the user has, but it *does not name
+any content in the CAS* — it is the hash of an index we do not store.
+If we let `registry@digest` collide across arches, a linux/amd64 save
+and a linux/arm64 save of the same upstream image would fight over the
+same name. So the two are **disambiguated by shape**, in a name class
+of their own:
+
+- **Shape**: `oci/<os>/<arch>/<algo>/<hex>` (e.g.
+  `oci/linux/amd64/sha256/3f4d6b32e267…`). Each component is a
+  classification (format, OS, arch, digest algorithm) and the leaf is
+  the identifier.
+- **Source**: the `--upstream` flag on `add` and `oci import` (plus
+  `--platform` or `--arch`). It accepts the full OCI digest
+  (`sha256:<hex>`) or a bare hex (assumed sha256); non-sha256 algos
+  are rejected at import — the store only bridges that one.
+- **Storage**: a plain name, like any other — one flat segment in the
+  name index (the `/`s are escaped via the same `index.Encode` every
+  registry-style name uses), resolved through the same name-index path
+  as `blob get`/`lookup`/`cat` and served by the same `/name/<name>`
+  gateway. No new backend API, no new mount option.
+- **Mount surface**: it is also projected as the `oci/` top directory
+  in the FUSE view — a 5-level directory tree where the leaf is a
+  symlink to `../blob/<CID>`. A client that wants a flat base path
+  like apptainer's `--basepath` passes
+  `<mount>/oci/linux/amd64/sha256` and reads the file `<hex>` under
+  it.
+
+The shape is chosen to *avoid* the direct-handle path in the resolver:
+`oci/...` is not a CID, not a bare OCI digest, and not a digest-shaped
+name, so it flows straight to the name-index lookup. That is the
+mechanism that lets it "tolerate the missing upstream index" safely —
+the foreign identifier is a *label for* the content, never an
+assertion *of* the content.
+
 And the two are **decoupled**: the foreign name can drift while our
 CID stays put. The user can re-chunk a file for IPFS (a different
 foreign raw CID, the *same bytes* → the same store CID), or move an

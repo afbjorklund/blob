@@ -104,6 +104,12 @@ Options:
 - `--user` / `--pass` (or `BLOB_USER`/`BLOB_PASS`) - remote-backend credentials
   (Basic auth user/password for `http`; access key / secret key for `s3`)
 
+`--upstream` / `--platform` / `--arch` (only on `add` and `oci import`) —
+record the blob under a *multiarch reference name* `oci/<os>/<arch>/sha256/<hex>`
+in addition to the basename. See "Record an upstream OCI reference" below.
+The `--upstream` value is the multiarch index digest `docker pull` prints
+(`sha256:<hex>` or a bare hex; only sha256 is accepted).
+
 All of these are global flags (any subcommand accepts them), and each can be
 pre-set via an environment variable the flag falls back to: `BLOB_STORAGE_TYPE`
 (`--storage`), `BLOB_STORAGE_PATH` (`--path`), `BLOB_BUCKET` (`--bucket`),
