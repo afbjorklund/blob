@@ -43,9 +43,10 @@ blob --help
   materializing the whole blob in memory
 - **FUSE mount** - A built-in `blob mount` command (Linux; like `ipfs mount`)
   exposes the store read-only as a local filesystem: the recorded index names
-  appear under `name/` as symlinks to their blob's CID, and the content is
-  readable as regular files under `blob/<CID>` (streamed, never buffered
-  whole). It uses `bazil.org/fuse` (pure Go — no CGO) and is read-only
+   appear under `name/` as symlinks to their blob's CID, and the content is
+   readable as regular files under `blob/<CID>` or `blob/sha256:<hex>` (the
+   go-digest spelling — bare hex is not accepted there), streamed and never
+   buffered whole. It uses `bazil.org/fuse` (pure Go — no CGO) and is read-only
 - **Read-only HTTP gateway** - `blob serve` serves the blobs over plain HTTP —
   `GET /blob/<CID>` and `GET /name/<name>` (a `302`-redirect to the canonical
   `/blob/<CID>`) — so a stable `blob://<CID>` maps to `http://<host>/blob/<CID>`
@@ -433,8 +434,9 @@ open, the same as `serve`), so `name/` and `blob/` present whichever backends
 you point at:
 
 ```text
-name/<name>   one symlink per recorded index name, linking to the blob's CID
-blob/<CID>    the content as a regular file, streamed on read
+name/<name>          one symlink per recorded index name, linking to the blob's CID
+blob/<CID>           the content as a regular file, streamed on read
+blob/sha256:<hex>    the same content, addressed by its OCI (SHA-2 256) digest
 ```
 
 - `name/` **is listable** — it is the store's index (the `blob list` set).
@@ -442,11 +444,12 @@ blob/<CID>    the content as a regular file, streamed on read
   so `name/<n>` and `blob/<CID>` are the same "name → canonical blob" pointer,
   rendered as a link instead of the gateway's `302`. The target is a relative
   `../blob/<CID>`, so it resolves correctly no matter where the mount lives.
-- `blob/` is **addressable by CID, not enumerable**: `blob/<CID>` opens and
-  `cat`s/`stat`s normally, but `ls blob/` is empty — the store exposes no
-  "list all blobs" (the index, not the CAS, is what `Names()` covers), so the
-  directory is read by path only. This is the same property as the OCI
-  surface, which addresses inner blobs by digest and never lists them.
+- `blob/` is **addressable by CID or OCI digest, not enumerable**: `blob/<CID>`
+  and `blob/sha256:<hex>` (the go-digest spelling; bare hex is *not* accepted
+  there) open and `cat`/`stat` normally, but `ls blob/` is empty — the store
+  exposes no "list all blobs" (the index, not the CAS, is what `Names()`
+  covers), so the directory is read by path only. This is the same property as
+  the OCI surface, which addresses inner blobs by digest and never lists them.
 - Reads are **streaming and bounded** (the kernel page cache serves re-reads);
   a multi-GB blob is served page-by-page, never buffered whole in the mount.
 - It is **read-only** end to end: the mount is opened `ro` and the backend is
@@ -459,7 +462,9 @@ $ ls $HOME/.blob-mount/name/
 busybox  busybox.sif  ubuntu_latest.sif  …
 $ cat $HOME/.blob-mount/name/busybox    # follows the link: same bytes as blob get
 $ stat -c '%s' $HOME/.blob-mount/blob/v060084h…   # size, no download
-$ ls $HOME/.blob-mount/blob/                 # empty — the CAS is not listable
+$ cat $HOME/.blob-mount/blob/$(sha256sum base.sif | cut -d' ' -f1 | sed 's/^/sha256:/') \
+        # the same blob, addressed by its sha256 — e.g. a local-file --base hash
+$ ls $HOME/.blob-mount/blob/              # empty — the CAS is not listable
 ```
 
 ### Name index

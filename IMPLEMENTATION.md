@@ -19,7 +19,7 @@ Six thin packages sit between `storage` and the `main` package
 | `index/`    | `identity` + `cid`               | the name-index conventions: recordability, default name, escape  |
 | `oci/`      | go-digest + stdlib only          | the OCI layout half: types, walk, copy, layout adapters          |
 | `daemon/`   | `storage` (read-only)            | the testable serving layer: CID gateway + OCI distribution read  |
-| `mount/`    | `storage` (read-only)            | the FUSE read surface: `name/` (symlinks) + `blob/<CID>` (files) |
+| `mount/`    | `storage` (read-only), `identity` | the FUSE read surface: `name/` (symlinks) + `blob/<CID\|sha256:…>` (files) |
 
 The split is per *library each package may touch*: `storage/` never decodes
 the multihash, `oci/` never names a CID or a backend, `identity/` is the one
@@ -184,11 +184,12 @@ returns an error elsewhere).
     first byte → `cid.CodecForFirstByte` → `cid.Render`). The `name` entry
     is therefore a FUSE symlink — the filesystem form of the daemon's
     `/name` `302`.
-  - `blob/` is *not listable*: it has no `ReadDirAll`; `Lookup(<CID>)`
-    returns a `blobFile` that streams on read. This is deliberate and
-    mirrors `daemon` (the `/v2/blob/<CID>` surface also addresses by
-    CID without listing) and the `storage` interface (`Names()` is the
-    index, not the CAS; there is no "list all blobs" method).
+   - `blob/` is *not listable*: it has no `ReadDirAll`; `Lookup(<CID>)` (or
+     `Lookup(sha256:<hex>)` — the go-digest spelling, bare hex not accepted)
+     returns a `blobFile` that streams on read. This is deliberate and mirrors
+     `daemon` (the `/v2/blob/<CID>` surface also addresses by CID without
+     listing) and the `storage` interface (`Names()` is the index, not the CAS;
+     there is no "list all blobs" method).
 - **Streaming, forward-only, page-bounded reads.** `blobFile.Open` does a
   single `backend.Get` and hands the `io.ReadCloser` to a `blobHandle`,
   which serves each kernel `Read` (page-sized) by reading that page off the

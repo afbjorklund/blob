@@ -448,7 +448,6 @@ var (
 	ociSetupPayloadAmdIdx  = []byte(`{"schemaVersion":2}`)
 )
 
-
 // TestBlobSurface checks blob/: a stored CID is a stat-able regular file that
 // streams the exact stored bytes back (page by page, forward-only); unknown
 // and foreign-codec CIDs are ENOENT; and the directory is not enumerable.
@@ -541,6 +540,32 @@ func TestBlobSurface(t *testing.T) {
 	}
 	if _, err := bd.Lookup(ctx, "not-a-cid"); !isEnoent(err) {
 		t.Fatalf("Lookup(blob/garbage) err = %v, want ENOENT", err)
+	}
+
+	// OCI digest form: sha256:<hex> of a stored payload resolves; the same
+	// hex without the "sha256:" prefix does not; an unknown "sha256:<hex>"
+	// does not.
+	id, err := identity.HashReader(bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := identity.ToOCI(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dnode, err := bd.Lookup(ctx, d.String())
+	if err != nil {
+		t.Fatalf("Lookup(blob/%s) err = %v, want the blob", d, err)
+	}
+	if df, ok := dnode.(*blobFile); !ok || !bytes.Equal(df.key, key) {
+		t.Fatalf("Lookup(blob/%s) = %T key %x, want *blobFile key %x", d, dnode, dnode, key)
+	}
+	if _, err := bd.Lookup(ctx, d.Encoded()); !isEnoent(err) {
+		t.Fatalf("Lookup(blob/%s) (bare hex) err = %v, want ENOENT", d.Encoded(), err)
+	}
+	unknownHex := "0000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	if _, err := bd.Lookup(ctx, "sha256:"+unknownHex); !isEnoent(err) {
+		t.Fatalf("Lookup(blob/sha256:%s) err = %v, want ENOENT", unknownHex, err)
 	}
 }
 

@@ -14,13 +14,15 @@
 //	         `stat name/<n>` / `readlink` do a single Lookup plus a single
 //	         Peek for the first-byte codec rule (the same name→CID daemon
 //	         derives for /name/<name>).
-//	blob/  - one regular file per stored blob, addressed by rendered CID.
-//	         The directory is deliberately NOT enumerable (ReadDirAll returns
-//	         nothing): the StorageBackend interface exposes no "list all
-//	         blobs" method (Names() is the index, not the CAS), and that is
-//	         the right shape — the CAS is addressable, not listable, exactly
-//	         as daemon serves /blob/<CID> and the /v2/blob/<CID> OCI surface
-//	         without ever enumerating the store.
+//	blob/  - one regular file per stored blob, addressed by rendered CID or
+//	         by OCI digest ("sha256:<hex>", the go-digest spelling; the bare
+//	         hex is deliberately not accepted there). The directory is
+//	         deliberately NOT enumerable (ReadDirAll returns nothing): the
+//	         StorageBackend interface exposes no "list all blobs" method
+//	         (Names() is the index, not the CAS), and that is the right shape
+//	         — the CAS is addressable, not listable, exactly as daemon serves
+//	         /blob/<CID> and the /v2/blob/<CID> OCI surface without ever
+//	         enumerating the store.
 //	oci/   - the origin-reference surface: a projection of the name index
 //	         restricted to names of the shape
 //	         "oci/<variant>/<os>/<arch>/<algo>/<hex>". The top four levels
@@ -65,6 +67,7 @@ import (
 	"bazil.org/fuse/fs"
 
 	"blob/cid"
+	"blob/identity"
 	"blob/index"
 	"blob/storage"
 )
@@ -276,23 +279,28 @@ func (*blobDir) ReadDirAll(_ context.Context) ([]fuse.Dirent, error) {
 	return nil, nil
 }
 
-// Lookup parses the entry name as a CID (any multibase), checks that the
-// store holds that codec, and confirms the blob exists (Has — the cheap
-// existence probe that gives a clean ENOENT). It returns a blobFile; the
-// content itself is streamed on demand by the handle, so a lookup stats the
-// entry without reading a byte.
+// Lookup resolves the entry name to a store key: a CID (any multibase) of a
+// held codec, or an OCI digest "sha256:<hex>" (the go-digest spelling — the
+// bare-hex form deliberately is not accepted, so a registry-ish name under
+// name/ cannot bleed into the content surface by accident). It then confirms
+// the blob exists (Has — the cheap existence probe that gives a clean ENOENT).
+// It returns a blobFile; the content itself is streamed on demand by the
+// handle, so a lookup stats the entry without reading a byte.
 func (n *blobDir) Lookup(_ context.Context, name string) (fs.Node, error) {
-	c, perr := cid.Parse(name)
-	if perr != nil {
+	var key storage.Digest
+	if c, perr := cid.Parse(name); perr == nil {
+		// A CID the store does not hold (e.g. a foreign dag-pb codec) is not a
+		// direct address in this store; it is only referable as a name under
+		// name/, never as a blob/<CID> entry.
+		if !cid.Supported(cid.Codec(c)) {
+			return nil, syscall.ENOENT
+		}
+		key = storage.Digest(c.Hash())
+	} else if id, err := identity.FromOCIString(name); err == nil {
+		key = identity.Identity(id)
+	} else {
 		return nil, syscall.ENOENT
 	}
-	// A CID the store does not hold (e.g. a foreign dag-pb codec) is not a
-	// direct address in this store; it is only referable as a name under
-	// name/, never as a blob/<CID> entry.
-	if !cid.Supported(cid.Codec(c)) {
-		return nil, syscall.ENOENT
-	}
-	key := storage.Digest(c.Hash())
 	have, herr := n.fs.backend.Has(key)
 	if herr != nil {
 		return nil, herr
