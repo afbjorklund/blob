@@ -46,13 +46,6 @@ var (
 	// OCI import/export
 	ociNames []string
 
-	// OCI upstream reference: record the blob under an
-	// "oci/<variant>/<os>/<arch>/<algo>/<hex>" name (the origin reference).
-	ociUpstream string
-	ociPlatform string
-	ociArch     string
-	ociVariant  string
-
 	// cid
 	cidBase string
 )
@@ -92,20 +85,19 @@ func defaultS3Region() string {
 }
 
 // ociRefName returns the canonical "oci/<variant>/<os>/<arch>/<algo>/<hex>"
-// name for the --upstream/--platform/--arch/--variant flags, or false when the
-// blob was not recorded with an origin reference. It is the single point where
-// the flags combine into the record shape, so `add` and `oci import` share it
-// and never drift.
+// name for the --upstream/--platform/--arch/--variant flags of `oci import`,
+// or false when the import was not recorded with an origin reference. It is
+// the single point where the flags combine into the record shape.
 func ociRefName() (ref string, ok bool, err error) {
 	if ociUpstream == "" {
 		return "", false, nil
 	}
 	if ociVariant == "" {
 		// A caller that sets --upstream but not --variant is asking for an
-		// origin reference without declaring what the leaf names. The default
-		// depends on the verb: `add` (a bare file) → "blob"; `oci import` of
-		// a layout → "image" (or "artifact" by flag). That default is set by
-		// the verb before this is called, so a non-empty variant is expected.
+		// origin reference without declaring what the leaf names: a bare file
+		// is "blob", a layout import "image" (or "artifact" by flag). That
+		// default is set by the verb before this is called, so a non-empty
+		// variant is expected.
 		return "", false, fmt.Errorf("--upstream requires --variant (one of: blob, image, artifact)")
 	}
 	if !index.OciVariantValid(ociVariant) {
@@ -286,9 +278,6 @@ func main() {
 	}
 
 	addCmd.Flags().BoolVarP(&hashOnly, "only-hash", "n", false, "only compute and print the hash, do not store")
-	addCmd.Flags().StringVar(&ociUpstream, "upstream", "", "the OCI multi-arch origin digest the blob came from (sha256:<hex> or a bare hex); when set, the blob is additionally recorded under an oci/blob/<os>/<arch>/<algo>/<hex> name")
-	addCmd.Flags().StringVar(&ociPlatform, "platform", "", "platform the --upstream digest was built for (os/arch; e.g. linux/amd64); if unset, --arch (or the local arch) is implied under linux")
-	addCmd.Flags().StringVar(&ociArch, "arch", "", "arch the --upstream digest was built for; a shortcut for --platform linux/<arch>; if unset, the local arch (linux/"+runtime.GOARCH+") is implied")
 
 	rootCmd.AddCommand(addCmd)
 
@@ -555,51 +544,13 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Optionally record the OCI upstream reference name as well. It is a
-	// plain name for the store (one flat segment under Encode) and never
-	// shadows the baseline name: the two address the same blob key for this
-	// add, but a name recorded under one and not the other stays visible
-	// under its own spelling.
-	// A bare file recorded via `add` is always a "blob" variant: the leaf is
-	// the file bytes themselves, not an OCI index JSON. The variant is set
-	// here (not on the flag) so the user cannot accidentally record a
-	// non-file under a file-only name.
-	if ociUpstream != "" {
-		ociVariant = index.OciVariantBlob
-	}
-	ref, ok, refErr := ociRefName()
-	if refErr != nil {
-		return refErr
-	}
-	if ok {
-		if _, cerr := index.Check(ref, digest); cerr != nil {
-			return cerr
-		}
-		if err := backend.Index(ref, digest); err != nil {
-			return err
-		}
-	}
-
 	if has {
-		if ok {
-			fmt.Printf("File already exists in store: %s (also recorded %s)\n", cidStr, ref)
-		} else {
-			fmt.Printf("File already exists in store: %s\n", cidStr)
-		}
+		fmt.Printf("File already exists in store: %s\n", cidStr)
 		return nil
 	}
 
 	if skip {
-		if ok {
-			fmt.Printf("Added: %s (name %q skipped: it is already the blob's own digest handle; recorded %s)\n", cidStr, name, ref)
-		} else {
-			fmt.Printf("Added: %s (name %q skipped: it is already the blob's own digest handle)\n", cidStr, name)
-		}
-		return nil
-	}
-
-	if ok {
-		fmt.Printf("Added: %s (also recorded %s)\n", cidStr, ref)
+		fmt.Printf("Added: %s (name %q skipped: it is already the blob's own digest handle)\n", cidStr, name)
 		return nil
 	}
 

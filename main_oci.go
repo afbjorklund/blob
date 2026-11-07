@@ -23,6 +23,15 @@ import (
 // digests using the identity package. Blobs are streamed between the layout and
 // the store; only the small index.json and manifest are buffered.
 
+// OCI upstream reference flags: record the import under an
+// "oci/<variant>/<os>/<arch>/<algo>/<hex>" name (the origin reference).
+var (
+	ociUpstream string
+	ociPlatform string
+	ociArch     string
+	ociVariant  string
+)
+
 // storeSink adapts a ReadWrite backend to an oci.Sink, translating each OCI
 // digest to the store's identity (multihash) key.
 type storeSink struct {

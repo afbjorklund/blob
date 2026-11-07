@@ -223,17 +223,18 @@ shape**, in a name class of their own:
   (a SIF or a tar, the thing `apptainer --basepath` wants); `image` —
   an OCI image index (the layout `docker save` produces); `artifact` —
   an OCI artifact index (the layout `oras`/`apptainer push` produces).
-  `add <file>` is always `blob`; `oci import <layout>` is `image` or
-  `artifact` (the shape the user declared, not something the store can
-  sniff); `oci import <bare-file>` is `blob`. This lets three
-  co-exist under one `(os, arch, digest)` — the SIF, the image layout,
-  and the artifact layout — each at its own path, each naming its own
-  stored CID.
+   `oci import <bare-file>` is always `blob`; `oci import <layout>` is
+   `image` or `artifact` (the shape the user declared, not something the
+   store can sniff). This lets three co-exist under one `(os, arch,
+   digest)` — the SIF, the image layout, and the artifact layout — each
+   at its own path, each naming its own stored CID. The flags are an OCI
+   concern and live only on `oci import`: a plain `blob add` records
+   only the basename and never files an `oci/` name.
 - **Source**: the `--upstream` flag (plus `--platform` or `--arch`) on
-  `add` and `oci import`, plus `--variant` on `oci import` (default
-  `image`). `--upstream` accepts the full OCI digest (`sha256:<hex>`)
-  or a bare hex (assumed sha256); non-sha256 algos are rejected at
-  import — the store only bridges that one.
+  `oci import`, plus `--variant` (default `image`). `--upstream`
+  accepts the full OCI digest (`sha256:<hex>`) or a bare hex (assumed
+  sha256); non-sha256 algos are rejected at import — the store only
+  bridges that one.
 - **Storage**: a plain name, like any other — one flat segment in the
   name index (the `/`s are escaped via the same `index.Encode` every
   registry-style name uses), resolved through the same name-index path
