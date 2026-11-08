@@ -100,7 +100,7 @@ and CID-shape decisions live beside the ones they bridge):
   `NormalizeOciDigest(d)` / `NormalizePlatform(p)` (in `oci.go`) — the
   origin-reference name conventions: the
   `oci/<variant>/<os>/<arch>/<algo>/<hex>` shape a user records with
-  `--upstream --arch`. The shape is checked once, here, so the write path
+  `--digest --arch`. The shape is checked once, here, so the write path
   (`main.go`, `main_oci.go`) and the FUSE tree (`mount.go`) agree on it.
   An origin reference is an ordinary name (one flat segment after
   `Encode`), not a backend-specific construct; the `variant` component is

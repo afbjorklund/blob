@@ -334,10 +334,10 @@ but are different stored blobs).
 ```bash
 B=sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
 # a SIF built for amd64 (bare file => blob)
-blob oci import busybox.sif      --upstream "$B" --arch amd64
-blob oci import busybox-arm.sif  --upstream "$B" --arch arm64
+blob oci import busybox.sif      --digest "$B" --arch amd64
+blob oci import busybox-arm.sif  --digest "$B" --arch arm64
 # the OCI layout for amd64 (layout => json)
-blob oci import busybox.tgz --upstream "$B" --arch amd64
+blob oci import busybox.tgz --digest "$B" --arch amd64
 # resolve any of them back to a CID
 blob lookup oci/blob/linux/amd64/sha256/a46257e0...
 blob lookup oci/json/linux/amd64/sha256/a46257e0...

@@ -23,10 +23,10 @@ import (
 // digests using the identity package. Blobs are streamed between the layout and
 // the store; only the small index.json and manifest are buffered.
 
-// OCI upstream reference flags: record the import under an
+// OCI base-reference flags: record the import under an
 // "oci/<variant>/<os>/<arch>/<algo>/<hex>" name (the origin reference).
 var (
-	ociUpstream string
+	ociDigest   string
 	ociPlatform string
 	ociArch     string
 )
@@ -473,10 +473,10 @@ func registerOCICmds(root *cobra.Command) {
 		Args:    cobra.ExactArgs(1),
 		RunE:    runOCIAdd,
 	}
-	addCmd.Flags().StringArrayVarP(&ociNames, "name", "", []string{}, "additional index name to record (repeatable); the basename of the argument is always recorded as well — for a layout pointing at its index, for a bare file pointing at the file's own bytes (the artifact's single layer, the same key `blob add` uses)")
-	addCmd.Flags().StringVar(&ociUpstream, "upstream", "", "the OCI multi-arch origin digest the image was pulled for (sha256:<hex> or a bare hex); when set, the import is additionally recorded under an oci/<variant>/<os>/<arch>/<algo>/<hex> name (the variant follows the input shape: a bare file is blob, a layout is json)")
-	addCmd.Flags().StringVar(&ociPlatform, "platform", "", "platform the --upstream digest was pulled for (os/arch; e.g. linux/amd64); if unset, --arch (or the local arch) is implied under linux")
-	addCmd.Flags().StringVar(&ociArch, "arch", "", "arch the --upstream digest was pulled for; a shortcut for --platform linux/<arch>; if unset, the local arch is implied under linux")
+	addCmd.Flags().StringArrayVarP(&ociNames, "name", "", []string{}, "the base name the image was pulled as (org.opencontainers.image.base.name), an additional index name to record (repeatable); the basename of the argument is always recorded as well — for a layout pointing at its index, for a bare file pointing at the file's own bytes (the artifact's single layer, the same key `blob add` uses)")
+	addCmd.Flags().StringVar(&ociDigest, "digest", "", "the base digest the image was pulled for (org.opencontainers.image.base.digest), a multi-arch origin digest (sha256:<hex> or a bare hex) that is the same for every arch of the image, so --platform/--arch is the component that disambiguates; when set, the import is additionally recorded under an oci/<variant>/<os>/<arch>/<algo>/<hex> name (the variant follows the input shape: a bare file is blob, a layout is json)")
+	addCmd.Flags().StringVar(&ociPlatform, "platform", "", "platform the --digest was pulled for (os/arch; e.g. linux/amd64); if unset, --arch (or the local arch) is implied under linux")
+	addCmd.Flags().StringVar(&ociArch, "arch", "", "arch the --digest was pulled for; a shortcut for --platform linux/<arch>; if unset, the local arch is implied under linux")
 
 	getCmd := &cobra.Command{
 		Use:     "export <cid|name|digest> -o <dir | tar>",

@@ -11,7 +11,7 @@ import (
 // ("~/.blob-mount/oci/") and in the /name/ HTTP surface.
 //
 // The rest of the name carries the variant (what the leaf names), the
-// platform (os/arch), and the upstream digest (algorithm/hex). The leaf is a
+// platform (os/arch), and the base digest (algorithm/hex). The leaf is a
 // content address held in this store; the digest and platform are foreign
 // identifiers the store carries as labels, not things it resolves against.
 const OciPrefix = "oci"
@@ -60,7 +60,7 @@ func IsOciRef(nm string) bool {
 
 // ParseOciRefName splits an OCI reference name into its five components:
 // variant, OS, architecture, digest algorithm, and digest hex (all non-empty;
-// the hex is lowercase hex — the upstream digest of record).
+// the hex is lowercase hex — the base digest of record).
 //
 // The expected shape is:
 //
@@ -104,7 +104,7 @@ func BuildOciName(variant, os, arch, algo, hex string) string {
 	return OciPrefix + "/" + variant + "/" + os + "/" + arch + "/" + algo + "/" + hex
 }
 
-// NormalizeOciDigest accepts an upstream digest in the forms users type —
+// NormalizeOciDigest accepts a base digest in the forms users type —
 // "sha256:<hex>" (the OCI digest spelling) or a bare lowercase hex — and
 // splits it into (algorithm, hex). Only sha256 is accepted: it is the sole
 // algorithm this store bridges (identity.FromOCI), and the "reject at import"

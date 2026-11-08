@@ -236,7 +236,7 @@ func TestCheckOciRefName(t *testing.T) {
 	// intercept it (digest.Parse and cid.Parse both fail on the oci/ shape)
 	// and must not skip it (it never matches a blob's own multihash). This is
 	// why the composite can be recorded freely for any target — the
-	// "tolerate the missing upstream index" case we deliberately accept.
+	// "tolerate the missing base index" case we deliberately accept.
 	abc := keyFor(t, []byte("abc"))
 	name := BuildOciName("blob", "linux", "amd64", "sha256", "3f4d6b32")
 	got, err := Check(name, abc)

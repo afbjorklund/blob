@@ -85,21 +85,21 @@ func defaultS3Region() string {
 }
 
 // ociRefName returns the canonical "oci/<variant>/<os>/<arch>/<algo>/<hex>"
-// name for the --upstream/--platform/--arch flags of `oci import`, or false
+// name for the --digest/--platform/--arch flags of `oci import`, or false
 // when the import was not recorded with an origin reference. The variant is
 // a parameter (caller-derived from the input shape — a bare file is blob, a
 // layout is json), not a flag. It is the single point where the flags combine
 // into the record shape.
 func ociRefName(variant string) (ref string, ok bool, err error) {
-	if ociUpstream == "" {
+	if ociDigest == "" {
 		return "", false, nil
 	}
 	if variant == "" {
 		return "", false, fmt.Errorf("internal: no variant for an origin reference")
 	}
-	algo, hexv, err := index.NormalizeOciDigest(ociUpstream)
+	algo, hexv, err := index.NormalizeOciDigest(ociDigest)
 	if err != nil {
-		return "", false, fmt.Errorf("--upstream: %w", err)
+		return "", false, fmt.Errorf("--digest: %w", err)
 	}
 	osName, arch, err := resolveOciPlatform()
 	if err != nil {

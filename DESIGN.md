@@ -230,8 +230,8 @@ shape**, in a name class of their own:
   and the OCI layout — each at its own path, each naming its own stored CID.
   The flags are an OCI concern and live only on `oci import`: a plain
   `blob add` records only the basename and never files an `oci/` name.
-- **Source**: the `--upstream` flag (plus `--platform` or `--arch`) on
-  `oci import`. `--upstream` accepts the full OCI digest (`sha256:<hex>`)
+- **Source**: the `--digest` flag (plus `--platform` or `--arch`) on
+  `oci import`. `--digest` accepts the full OCI digest (`sha256:<hex>`)
   or a bare hex (assumed sha256); non-sha256 algos are rejected at import —
   the store only bridges that one.
 - **Storage**: a plain name, like any other — one flat segment in the
