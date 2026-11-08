@@ -261,10 +261,11 @@ func resolveStoreKey(arg string) (identity.Identity, error) {
 //
 //  1. a tar whose contents parse as a layout (index.json + ≥1 manifest) →
 //     the layout's blobs; for a gzip file, decompressed to a temp file first;
-//  2. a tar without index.json (e.g. a legacy docker archive) or a gzip that
-//     is not a tar → warn, then a single-layer artifact of the file's own
-//     bytes;
-//  3. anything else → a single-layer artifact of the file's own bytes.
+//  2. a tar with a manifest.json but no index.json (a pre-OCI legacy docker
+//     archive) → its config and layers, under a synthesized OCI index (upgraded
+//     in place, with an informational note);
+//  3. anything else (a tar without index.json, or a non-tar file) → a
+//     single-layer artifact of the file's own bytes.
 func openLayoutSource(arg string) (layoutSource, func(), oci.Digest, error) {
 	// A directory is an OCI layout.
 	if info, err := os.Stat(arg); err == nil && info.IsDir() {
@@ -304,37 +305,52 @@ func openLayoutSource(arg string) (layoutSource, func(), oci.Digest, error) {
 		// rewind it so the tar scan below reads from the start.
 		_, _ = tmp.Seek(0, io.SeekStart)
 		if src, err := oci.NewTarFileSource(tmp); err == nil {
-			if _, err := src.IndexBytes(); err == nil {
-				return src, func() {
+			if ls, ok := classifyTar(src, arg); ok {
+				return ls, func() {
 					_ = tmp.Close()
 					_ = os.Remove(tmp.Name())
 				}, "", nil
 			}
 		}
-		// A gzip that is not a tar layout (or a layout with no index.json)
-		// still means the *raw* file is the artifact, not its contents.
+		// A gzip that is not a tar layout still means the *raw* file is the
+		// artifact, not its contents: the decompressed temp file is unused.
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
 		return artifactWrap(arg)
 	}
 	if src, err := oci.NewTarFileSource(f); err == nil {
-		if _, err := src.IndexBytes(); err == nil {
-			return src, func() { _ = f.Close() }, "", nil
-		}
-		// A manifest.json without an index.json is a legacy docker archive
-		// (e.g. `podman save` with no -f). We do not import that format's
-		// per-blob structure — warn and fall through to the single-blob wrap.
-		if src.HasEntry("manifest.json") {
-			_, _ = fmt.Fprintf(os.Stderr,
-				"warning: %s is a legacy docker archive (manifest.json, no OCI index): importing it as a single blob (wrapped as an OCI artifact)\n"+
-					"  for per-layer import, save it in OCI form first: `podman save -f oci` or docker v25+\n",
-				arg)
+		if ls, ok := classifyTar(src, arg); ok {
+			return ls, func() { _ = f.Close() }, "", nil
 		}
 	}
 	_ = f.Close()
 
 	// Not a (gzip) tar layout: a bare file — wrap it as a single-layer artifact.
 	return artifactWrap(arg)
+}
+
+// classifyTar inspects src and decides whether it is a genuine OCI layout
+// (index.json) or a legacy docker archive (manifest.json only), returning the
+// matching layout source (src itself, or a LegacyArchive built over src).
+// Returns ok=false when src is neither shape; the caller then wraps the file
+// as an opaque single-blob artifact. The caller owns the underlying file and
+// its own closer; this function leaves both open.
+func classifyTar(src *oci.TarFileSource, path string) (ls layoutSource, ok bool) {
+	if _, err := src.IndexBytes(); err == nil {
+		return src, true
+	}
+	if !src.HasEntry("manifest.json") {
+		return nil, false
+	}
+	la, err := oci.NewLegacyArchive(src)
+	if err != nil {
+		// The archive is not a well-formed docker archive (dangling or
+		// malformed reference) — fall back to the opaque single-blob wrap.
+		fmt.Fprintf(os.Stderr, "info: %s: %v\n", path, err)
+		return nil, false
+	}
+	fmt.Fprintf(os.Stderr, "info: %s is a docker-archive; upgrading to OCI format\n", path)
+	return la, true
 }
 
 // artifactWrap wraps a bare file as a single-layer OCI artifact (its own bytes

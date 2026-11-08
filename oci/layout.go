@@ -235,10 +235,26 @@ func (t *TarFileSource) HasEntry(name string) bool {
 
 // Get streams the entry for d by seeking to its recorded data offset.
 func (t *TarFileSource) Get(d Digest) (io.ReadCloser, int64, error) {
-	name := entryName(d)
-	e, ok := t.entries[name]
+	return t.ReadEntry(entryName(d))
+}
+
+// EntrySize returns the size (bytes) of the named entry, or 0 and ok=false if
+// the tar has no entry with that name.
+func (t *TarFileSource) EntrySize(name string) (int64, bool) {
+	e, ok := t.entries[path.Clean(name)]
 	if !ok {
-		return nil, 0, fmt.Errorf("oci: tar layout missing %q", name)
+		return 0, false
+	}
+	return e.size, true
+}
+
+// ReadEntry streams the named entry (by its tar name, e.g. "manifest.json" or
+// a layer's basename) and its size. The caller must Close the returned reader.
+// The underlying file is owned by the TarFileSource; Close is a no-op here.
+func (t *TarFileSource) ReadEntry(name string) (io.ReadCloser, int64, error) {
+	e, ok := t.entries[path.Clean(name)]
+	if !ok {
+		return nil, 0, fmt.Errorf("oci: tar missing entry %q", name)
 	}
 	if _, err := t.r.Seek(e.offset, io.SeekStart); err != nil {
 		return nil, 0, err

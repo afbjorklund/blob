@@ -129,6 +129,15 @@ never names a multihash, a CID, or a storage backend):
    (`vnd.unknown.config.v1+json` config + `application/octet-stream` layer).
    *If we ever adopt the empty-config media type* (whose fallback would be
    meaningless), we would have to set `artifactType` again.
+- `NewLegacyArchive(src)` — `dockerarchive.go`: read a *legacy-only* docker
+  archive's `manifest.json` (Config + Layers array, no `index.json`, no
+  per-blob manifest — the pre-OCI `docker save` / `podman save` format whose
+  entry names **are** the sha256 digest, with a `.tar.gz` suffix on
+  compressed layers) and synthesize the OCI `index.json` + manifest that
+  reference the existing blobs. The resulting `LegacyArchive` satisfies
+  `oci.Source` + `IndexBytes`, so the import path ingests it exactly like a
+  genuine layout (the config and layers are stored under their own
+  digests, just as they would in a hybrid's OCI half).
 - `NewDir` (`DirLayout`) / `NewTarSink` / `NewTarFileSource` — the
   layout adapters (`oci.Source`/`oci.Sink`).
 - `ListMembers` / `ReadMember` — layer membership (tar listing / one member

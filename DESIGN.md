@@ -128,9 +128,14 @@ subsystem:
   config + layers`, storing the *reachable* set. Blobs that are in a
   tar but referenced by nothing (e.g. the docker-archive half of a
   v25+ "hybrid") are never walked and never stored — we read the OCI
-  half, ignore the docker half. A bare file (no layout) is wrapped as
-  a single-layer **artifact**: the canonical empty-config `{}` + one
-  layer.
+  half, ignore the docker half. A legacy-only docker archive (a tar
+  with `manifest.json` and no `index.json`) is upgraded in place: its
+  `manifest.json` names the same blobs by their own sha256 digest, so
+  a synthesized `index.json` + manifest references them directly and
+  the walk stores the config and layers under their own digests.
+  Only a file with *no* layout at all (no `index.json`, no
+  `manifest.json`) is wrapped as a single-layer **artifact**: the
+  canonical empty-config `{}` + one layer of the file's own bytes.
 - **The artifact is a pure function of the layer.** For a single
   layer, the whole OCI scaffold (`index.json`, its manifest, the
   `{}` config) is determined by content alone — the layer digest,

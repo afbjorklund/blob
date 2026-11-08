@@ -441,3 +441,245 @@ func mustParseManifest(t *testing.T, b []byte) *Manifest {
 	}
 	return m
 }
+
+func TestNewLegacyArchive(t *testing.T) {
+	config := []byte(`{"architecture":"amd64","os":"linux"}`)
+	layer := []byte("layer-content")
+	manifest := []byte(`[{"Config":"sha256:` + DigestOf(config).Encoded() +
+		`","RepoTags":["busybox:latest"],"Layers":["` +
+		DigestOf(layer).Encoded() + `.tar.gz"]}]`)
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	writeTarEntry(t, tw, "manifest.json", manifest)
+	writeTarEntry(t, tw, "sha256:"+DigestOf(config).Encoded(), config)
+	writeTarEntry(t, tw, DigestOf(layer).Encoded()+".tar.gz", layer)
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(t.TempDir(), "docker-archive.tar")
+	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	src, err := NewTarFileSource(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	la, err := NewLegacyArchive(src)
+	if err != nil {
+		t.Fatalf("NewLegacyArchive: %v", err)
+	}
+
+	// The synthesized index must be a well-formed OCI image index naming one
+	// manifest, whose digest is la.manifestDigest.
+	idx := mustParseIndex(t, la.indexBytes)
+	if len(idx.Manifests) != 1 {
+		t.Fatalf("index has %d manifests, want 1", len(idx.Manifests))
+	}
+	if idx.Manifests[0].Digest != la.manifestDigest {
+		t.Errorf("index manifest digest %s != %s", idx.Manifests[0].Digest, la.manifestDigest)
+	}
+
+	// The synthesized manifest must reference the original config and the
+	// single layer, with the correct media types and sizes.
+	mf := mustParseManifest(t, la.manifestBytes)
+	cfgD := DigestOf(config)
+	layerD := DigestOf(layer)
+	if mf.Config.Digest != cfgD {
+		t.Errorf("manifest config digest %s != %s", mf.Config.Digest, cfgD)
+	}
+	if mf.Config.MediaType != MediaTypeImageConfig {
+		t.Errorf("manifest config media type %q", mf.Config.MediaType)
+	}
+	if mf.Config.Size != int64(len(config)) {
+		t.Errorf("manifest config size %d != %d", mf.Config.Size, len(config))
+	}
+	if len(mf.Layers) != 1 {
+		t.Fatalf("manifest has %d layers, want 1", len(mf.Layers))
+	}
+	if mf.Layers[0].Digest != layerD {
+		t.Errorf("manifest layer digest %s != %s", mf.Layers[0].Digest, layerD)
+	}
+	if mf.Layers[0].MediaType != MediaTypeImageLayerGzip {
+		t.Errorf("manifest layer media type %q, want %q", mf.Layers[0].MediaType, MediaTypeImageLayerGzip)
+	}
+	if mf.Layers[0].Size != int64(len(layer)) {
+		t.Errorf("manifest layer size %d != %d", mf.Layers[0].Size, len(layer))
+	}
+
+	// Every digest must be served by Get as the right bytes: the index and
+	// manifest come from memory, the config and layer come verbatim from the
+	// tar (the whole point — no re-hashing, no re-encoding).
+	cases := map[Digest][]byte{
+		la.indexDigest:    la.indexBytes,
+		la.manifestDigest: la.manifestBytes,
+		cfgD:              config,
+		layerD:            layer,
+	}
+	for d, want := range cases {
+		r, size, err := la.Get(d)
+		if err != nil {
+			t.Errorf("Get(%s): %v", d, err)
+			continue
+		}
+		got, err := io.ReadAll(r)
+		_ = r.Close()
+		if err != nil {
+			t.Errorf("ReadAll(%s): %v", d, err)
+			continue
+		}
+		if size != int64(len(want)) {
+			t.Errorf("Get(%s) size %d != %d", d, size, len(want))
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("Get(%s) = %q, want %q", d, got, want)
+		}
+	}
+
+	// A foreign digest must refuse.
+	_, _, err = la.Get(DigestOf([]byte("not in the archive")))
+	if err == nil {
+		t.Error("Get(foreign digest) = nil err, want missing-digest error")
+	}
+}
+
+func TestNewLegacyArchiveMissingBlob(t *testing.T) {
+	// manifest.json references a layer that is not in the tar: NewLegacyArchive
+	// must fail at construction, not at Get time.
+	config := []byte(`{"architecture":"amd64","os":"linux"}`)
+	manifest := []byte(`[{"Config":"sha256:` + DigestOf(config).Encoded() +
+		`","RepoTags":[],"Layers":["` + make64('a') + `"]}]`)
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	writeTarEntry(t, tw, "manifest.json", manifest)
+	writeTarEntry(t, tw, "sha256:"+DigestOf(config).Encoded(), config)
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "missing.tar")
+	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	src, err := NewTarFileSource(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLegacyArchive(src); err == nil {
+		t.Error("NewLegacyArchive: err = nil, want missing-entry error")
+	}
+}
+
+func TestNewLegacyArchiveMultipleImages(t *testing.T) {
+	// A docker archive with more than one image entry is not the single-image
+	// case this import handles: refuse with a clear error.
+	config := []byte(`{}`)
+	hex := DigestOf(config).Encoded()
+	manifest := []byte("[" +
+		`{"Config":"sha256:` + hex + `","Layers":[]}` + "," +
+		`{"Config":"sha256:` + hex + `","Layers":[]}` + "]")
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	writeTarEntry(t, tw, "manifest.json", manifest)
+	writeTarEntry(t, tw, "sha256:"+hex, config)
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "multi.tar")
+	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	src, err := NewTarFileSource(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLegacyArchive(src); err == nil {
+		t.Error("NewLegacyArchive: err = nil, want multi-image error")
+	}
+}
+
+func TestReadEntryAndEntrySize(t *testing.T) {
+	// EntrySize + ReadEntry are the by-name accessors the legacy archive uses:
+	// they must surface any regular-file entry, not just layout-shaped ones.
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	writeTarEntry(t, tw, "manifest.json", []byte(`[]`))
+	writeTarEntry(t, tw, "data.txt", []byte("hello world"))
+	writeTarEntry(t, tw, "blobs/sha256/deadbeef", []byte("blob"))
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "entries.tar")
+	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	src, err := NewTarFileSource(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if size, ok := src.EntrySize("data.txt"); !ok || size != 11 {
+		t.Errorf("EntrySize(data.txt) = %d, %v; want 11, true", size, ok)
+	}
+	if size, ok := src.EntrySize("nope"); ok || size != 0 {
+		t.Errorf("EntrySize(nope) = %d, %v; want 0, false", size, ok)
+	}
+
+	r, size, err := src.ReadEntry("blobs/sha256/deadbeef")
+	if err != nil {
+		t.Fatalf("ReadEntry: %v", err)
+	}
+	defer r.Close()
+	if size != 4 {
+		t.Errorf("ReadEntry size = %d, want 4", size)
+	}
+	b, _ := io.ReadAll(r)
+	if string(b) != "blob" {
+		t.Errorf("ReadEntry = %q, want %q", b, "blob")
+	}
+
+	if _, _, err := src.ReadEntry("nope"); err == nil {
+		t.Error("ReadEntry(nope) err = nil, want missing-entry")
+	}
+}
+
+func TestDigestFromName(t *testing.T) {
+	cases := []struct {
+		name string
+		hex  string
+	}{
+		{"sha256:" + make64('a'), make64('a')},
+		{make64('b') + ".tar", make64('b')},
+		{make64('c') + ".tar.gz", make64('c')},
+		{make64('d') + ".tgz", make64('d')},
+	}
+	for _, c := range cases {
+		got, ok := digestFromName(c.name)
+		if !ok || got != c.hex {
+			t.Errorf("digestFromName(%q) = %q, %v; want %q, true", c.name, got, ok, c.hex)
+		}
+	}
+}

@@ -12,11 +12,15 @@
 // streamed end-to-end (a layer may be MB, GB, or TB); only index.json and the
 // manifest are small enough to be buffered.
 //
-// Only the modern OCI format is accepted: the output of
+// The OCI layout import accepts the modern OCI format — the output of
 // `podman save -f oci-archive|oci-dir`, `skopeo ... oci-archive:`, and a v25+
-// `docker save` "hybrid". The legacy docker-archive fields a hybrid carries
-// alongside the OCI half (`manifest.json`, `repositories`) are ignored — import
-// walks from index.json and stores only the reachable blobs.
+// `docker save` "hybrid" — and walks from its `index.json`, storing only the
+// reachable blobs (a hybrid's legacy docker-archive half, `manifest.json` +
+// `repositories`, is ignored). Separately, `NewLegacyArchive` upgrades a
+// *legacy-only* docker archive (a tar whose only structure is a top-level
+// `manifest.json` array, with no `index.json`) to that same OCI layout in
+// place, so an import of it preserves the per-layer structure rather than
+// wrapping the whole file.
 package oci
 
 import (

@@ -255,10 +255,11 @@ another multibase (`base16`, `base64url`, `base58btc`, …) as a learning aid.
 
 Import and export OCI layouts (images and artifacts). Input is the local OCI
 layout that `docker save`/`podman save` produce — a directory, or a tar
-(including the v25+ "hybrid" that is both a docker archive and an OCI archive;
-the OCI half is read, the docker half ignored), or its gzip-compressed form
-(a `.tgz`/`.tar.gz`), which is decompressed transparently. A bare file is
-wrapped as a single-layer OCI artifact.
+(a v25+ "hybrid" carries both a docker archive and an OCI archive; the OCI half
+is read, the docker half ignored; a _legacy-only_ docker archive — `manifest.json`
+and no `index.json` — is upgraded to OCI format in place, preserving its layers),
+or its gzip-compressed form (a `.tgz`/`.tar.gz`), which is decompressed
+transparently. A bare file is wrapped as a single-layer OCI artifact.
 
 ```bash
 # Import an OCI layout (dir or tar) — stores the reachable blobs, names it:
