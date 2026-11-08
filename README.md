@@ -5,6 +5,8 @@ similar to `ipfs` but local-only, with pluggable storage backends — and OCI
 import/export (images and artifacts, from the layouts `docker save`/`podman save`
 produce).
 
+![blob cyber structural logo](assets/blob.png)
+
 See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
 
 ## Build
