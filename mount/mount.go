@@ -196,7 +196,13 @@ func (n *nameDir) Attr(ctx context.Context, a *fuse.Attr) error {
 
 // ReadDirAll lists the index (backend.Names) — the only enumeration this
 // store exposes (the index, not the CAS). The result is already sorted by the
-// backends (their contract: lexicographic clean-name order).
+// backends (their contract: lexicographic clean-name order). OCI origin
+// references (the "oci/<variant>/<os>/<arch>/<algo>/<hex>" provenance names)
+// are deliberately omitted here — they are presented as their own tree under
+// oci/, and repeating them under name/ as single flat slash-bearing entries
+// is not readable (ls would show "oci/blob/linux/amd64/sha256/<hex>" as one
+// opaque entry). `ls name/` therefore shows only the ordinary free names;
+// the oci/ tree remains the surface a client walks for origin references.
 func (n *nameDir) ReadDirAll(_ context.Context) ([]fuse.Dirent, error) {
 	names, err := n.fs.backend.Names()
 	if err != nil {
@@ -204,6 +210,9 @@ func (n *nameDir) ReadDirAll(_ context.Context) ([]fuse.Dirent, error) {
 	}
 	out := make([]fuse.Dirent, 0, len(names))
 	for _, name := range names {
+		if index.IsOciRef(name) {
+			continue
+		}
 		out = append(out, fuse.Dirent{Name: name, Type: fuse.DT_Link})
 	}
 	return out, nil

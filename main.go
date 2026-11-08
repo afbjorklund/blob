@@ -38,6 +38,7 @@ var (
 	hashCheck   bool
 	hashIgnore  bool
 	listLong    bool
+	listOci     bool
 	listenAddr  string
 	mountDir    string
 	lookupOci   bool
@@ -362,6 +363,7 @@ lines.`,
 	}
 
 	listCmd.Flags().BoolVarP(&listLong, "long", "l", false, "also print each name's CID and blob size (one backend lookup per name)")
+	listCmd.Flags().BoolVarP(&listOci, "oci", "", false, "include OCI origin references (oci/...) in the listing (hidden by default)")
 
 	rootCmd.AddCommand(listCmd)
 
@@ -970,7 +972,9 @@ func runLookup(cmd *cobra.Command, args []string) error {
 // runList prints the recorded index names, one per line. It is the only
 // command that lists the index (not the CAS): a store with one blob and
 // two names prints two lines; a store with stored blobs but no names
-// prints nothing.
+// prints nothing. OCI origin references (the "oci/..." provenance names)
+// are hidden by default — they are machine-shaped and not very readable —
+// and shown only with --oci.
 func runList(cmd *cobra.Command, args []string) error {
 	backend, err := getStorageBackend(storage.ReadOnly)
 	if err != nil {
@@ -981,6 +985,17 @@ func runList(cmd *cobra.Command, args []string) error {
 	names, err := backend.Names()
 	if err != nil {
 		return err
+	}
+
+	if !listOci {
+		filtered := make([]string, 0, len(names))
+		for _, name := range names {
+			if index.IsOciRef(name) {
+				continue
+			}
+			filtered = append(filtered, name)
+		}
+		names = filtered
 	}
 
 	if !listLong {

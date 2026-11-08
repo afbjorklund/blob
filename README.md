@@ -180,6 +180,24 @@ ubuntu_26.04.sif    v05ah...j8dg    52428800
 ubuntu_latest.sif   v05ah...j8dg    52428800
 ```
 
+OCI origin references (`oci/<variant>/<os>/<arch>/<algo>/<hex>` provenance
+names, recorded by `oci import --digest`/`--arch`) are **not** listed by
+default — they are slash-bearing machine-shaped identifiers and not very
+readable next to the ordinary free names. `--oci` includes them in the listing
+(under either or both of the above forms):
+
+```console
+$ blob list
+ubuntu_26.04.sif
+ubuntu_latest.sif
+
+$ blob list --oci
+ubuntu_26.04.sif
+ubuntu_latest.sif
+oci/blob/linux/amd64/sha256/a46257e06c82ad...
+oci/blob/linux/arm64/sha256/a46257e06c82ad...
+```
+
 ### Look up a name's CID (convenience)
 
 ```bash
@@ -443,6 +461,9 @@ blob/sha256:<hex>    the same content, addressed by its OCI (SHA-2 256) digest
   so `name/<n>` and `blob/<CID>` are the same "name → canonical blob" pointer,
   rendered as a link instead of the gateway's `302`. The target is a relative
   `../blob/<CID>`, so it resolves correctly no matter where the mount lives.
+  OCI origin references (`oci/<variant>/<os>/<arch>/<algo>/<hex>`) are **not
+  listed under `name/`** (they live under the dedicated `oci/` tree, which is
+  their structured, walkable form in the mount).
 - `blob/` is **addressable by CID or OCI digest, not enumerable**: `blob/<CID>`
   and `blob/sha256:<hex>` (the go-digest spelling; bare hex is *not* accepted
   there) open and `cat`/`stat` normally, but `ls blob/` is empty — the store

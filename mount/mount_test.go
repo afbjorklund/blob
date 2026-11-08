@@ -182,13 +182,23 @@ func TestRootShape(t *testing.T) {
 // TestNameSurface checks name/: it lists the recorded index names (all DT_Link),
 // each Lookup returns a symlink whose target is ../blob/<derived CID> (the
 // CID asserted via the store's own codec rule, independent of the mount path),
-// and an unknown name is ENOENT.
+// and an unknown name is ENOENT. OCI origin references that the index also holds
+// are NOT listed under name/ — they live under the dedicated oci/ tree only.
 func TestNameSurface(t *testing.T) {
 	m := newMem()
 	jsonPayload := []byte(`{"hello":"world"}`)        // '{' -> Json
 	rawPayload := []byte("plain bytes, no json head") // 'p' -> Raw
 	jk := m.store(t, "j.json", jsonPayload)
 	rk := m.store(t, "r.bin", rawPayload)
+	// An OCI origin reference is also recorded in the index; it must not
+	// surface under name/ (ls would otherwise show it as one opaque
+	// slash-bearing entry), but it is still reachable via the oci/ tree.
+	ociPayload := []byte("sif-ish bytes for the origin ref")
+	ok_ := m.store(t, "", ociPayload)
+	ociName := "oci/blob/linux/amd64/sha256/3f4d6b32e26703c6"
+	if err := m.Index(ociName, ok_); err != nil {
+		t.Fatal(err)
+	}
 	wantJ := wantCID(t, jsonPayload, jk)
 	wantR := wantCID(t, rawPayload, rk)
 
@@ -204,12 +214,16 @@ func TestNameSurface(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Only the two ordinary names are listed — the OCI reference is not.
 	if len(list) != 2 {
-		t.Fatalf("name/ listing = %d entries, want 2", len(list))
+		t.Fatalf("name/ listing = %d entries, want 2 (oci/... entries hidden): %v", len(list), list)
 	}
 	for _, d := range list {
 		if d.Type != fuse.DT_Link {
 			t.Fatalf("name/%s type = %v, want DT_Link", d.Name, d.Type)
+		}
+		if d.Name == ociName {
+			t.Fatalf("name/ listing contained OCI reference %q; it should be filtered (use oci/)", d.Name)
 		}
 	}
 
