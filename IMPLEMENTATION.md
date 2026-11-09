@@ -290,6 +290,8 @@ The gates, cheapest first:
 4. `golangci-lint run` (govet + gocyclo; gofmt/goimports formatters; the
    final gate)
 5. `markdownlint-cli2 *.md` (doc changes)
+6. `shellcheck` the `*.sh`/`*.bash` (the e2e suite), per `.shellcheckrc`
+   (`shell=bash`; SC1090/SC1091 disabled — sourcing shell scripts is the design)
 
 ## Testing
 
@@ -307,4 +309,16 @@ The gates, cheapest first:
   (`BLOB_MOUNT_SMOKE=1`, needs `/dev/fuse` and the `fusermount3` setuid
   helper) — the store over a real FUSE connection. Run one:
   `BLOB_DIR_PATH=/mnt/nfs go test -v -run TestDirSmoke ./storage`.
-- `main` has no tests by convention (it is the CLI / adapters).
+- **E2E** (opt-in via `BLOB_E2E`, the `e2e/` CLI suite): a black-box test of
+  the `blob` binary itself — `add`/`get`, `oci import` (bare file, a valid
+  layout, and a tampered layout that must be refused with the store left
+  clean), `oci export`, and the `--name/--digest/--arch` naming surface —
+  against a local dir store. `e2e_test.go` is a thin adapter over `run.sh`
+  (bash + a shared helper `lib.sh`); it does not build the binary. A current
+  build is a prerequisite (`go build` first, or set `BLOB_BIN`); a missing
+  binary is a setup *fail*, not a skip. Skips a scenario that needs a tool
+  that is absent, and exits 77 (all skipped) when the test would run nothing.
+  Runs as `BLOB_E2E=1 go test -v -run TestE2E ./e2e`, or directly as
+  `go build && bash e2e/run.sh`.
+- `main` has no *package* tests by convention (it is the CLI / adapters; it is
+  exercised only as a black box, in the e2e suite above).

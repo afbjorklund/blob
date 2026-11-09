@@ -1,0 +1,19 @@
+# shellcheck config for the bash scripts (the e2e CLI suite).
+# Companion to .golangci.yml (Go) and .markdownlint.json (markdown); the
+# shell gate is `shellcheck` on the *.sh / *.bash files.
+#
+# The scripts are bash, not POSIX sh — the suite uses [[ ]], arrays, and a
+# source-library layout — so pin the dialect. shellcheck's rc file is
+# auto-discovered from the working directory (or the file's parent, walking up),
+# so this root config applies to scripts in subdirectories (e2e/) without a
+# per-file `# shellcheck` directive.
+shell=bash
+
+# The one policy we disagree with shellcheck on: we *do* source shell scripts
+# (a helper library, and a loop over the tNNN scenario files), and that is the
+# design, not a mistake. These two only fire where a source target is not a
+# constant file path; every other rule — quoting, arrays, set -euo pipefail —
+# stays fully enabled, so the gate still fails on genuinely mis-scripted bash.
+#   SC1090  a non-constant `source $path` (the orchestrator's scenario loop)
+#   SC1091  a `source`d file linted as its own input (the shared helper lib.sh)
+disable=SC1090,SC1091
