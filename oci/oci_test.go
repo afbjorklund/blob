@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -180,6 +181,88 @@ func TestCopyRoundTripDir(t *testing.T) {
 		if !bytes.Equal(sb, db) {
 			t.Errorf("blob %s differs between src and dst", d)
 		}
+	}
+}
+
+// buildTamperedLayout creates a single-manifest OCI layout in dir like
+// buildLayout, except the layer: the manifest names a *spoofed* digest
+// (<c…c>), while the blob stored at blobs/sha256/<c…c> holds different bytes
+// (whose sha256 is something else). The layout is therefore internally valid
+// JSON — index → manifest → config/layer all present — but content-inconsistent:
+// the bytes do not hash to the digest the manifest claims. That is exactly the
+// shape a corrupt or malicious import has, and it is what Verify must reject.
+// Every real digest (index, manifest, config) matches its content, so the
+// failure is isolated to the single spoofed layer. Returns the index bytes.
+func buildTamperedLayout(t *testing.T, dir string) (indexBytes []byte) {
+	t.Helper()
+
+	realData := []byte("payload-A-content-not-claimed-by-the-manifest")
+	spoof := Digest("sha256:" + make64('c'))    // valid sha256 digest, no matching content
+	blobs := map[Digest][]byte{spoof: realData} // stored under the spoofed name
+
+	cfgData := []byte(`{}`)
+	blobs[DigestOf(cfgData)] = cfgData
+
+	m := Manifest{
+		SchemaVersion: 2,
+		MediaType:     MediaTypeImageManifest,
+		Config:        Descriptor{MediaType: MediaTypeImageConfig, Digest: DigestOf(cfgData), Size: int64(len(cfgData))},
+		// Claims the layer is `spoof`; the file under that name holds realData.
+		Layers: []Descriptor{{MediaType: MediaTypeImageLayer, Digest: spoof, Size: int64(len(realData))}},
+	}
+	mb, err := Marshal(&m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs[DigestOf(mb)] = mb
+
+	idx := Index{
+		SchemaVersion: 2,
+		MediaType:     MediaTypeImageIndex,
+		Manifests:     []Descriptor{{MediaType: MediaTypeImageManifest, Digest: DigestOf(mb), Size: int64(len(mb))}},
+	}
+	ib, err := Marshal(&idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dl := NewDir(dir)
+	if err := dl.New(); err != nil {
+		t.Fatal(err)
+	}
+	for d, data := range blobs {
+		if err := dl.Put(d, int64(len(data)), bytes.NewReader(data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := dl.PutIndex(ib); err != nil {
+		t.Fatal(err)
+	}
+	return ib
+}
+
+func TestVerify(t *testing.T) {
+	// A consistent layout (buildLayout derives every digest from the content)
+	// verifies cleanly.
+	dir := t.TempDir()
+	ib, _ := buildLayout(t, dir,
+		memBlob{"a", []byte("ok-1")},
+		memBlob{"b", []byte("ok-2")},
+	)
+	if err := Verify(NewDir(dir), ib); err != nil {
+		t.Fatalf("Verify(consistent) = %v, want nil", err)
+	}
+
+	// A layout whose claimed layer digest does not match the stored content is
+	// rejected: the content re-hashes to its real digest, not the spoofed one.
+	bad := t.TempDir()
+	ibBad := buildTamperedLayout(t, bad)
+	err := Verify(NewDir(bad), ibBad)
+	if err == nil {
+		t.Fatal("Verify(tampered) = nil, want a mismatch error")
+	}
+	if !strings.Contains(err.Error(), "digest mismatch") {
+		t.Errorf("Verify(tampered) = %q, want it to surface a digest mismatch", err)
 	}
 }
 

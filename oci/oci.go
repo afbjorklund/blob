@@ -307,3 +307,62 @@ func Copy(src Source, sink Sink, indexBytes []byte) (Digest, []Digest, error) {
 
 	return indexDigest, reachable, nil
 }
+
+// VerifyReader reports whether r's bytes hash to d. It streams (SHA-2 256 is
+// computed as the bytes are read), so memory is O(1) regardless of content
+// size — a blob may be MB, GB, or TB, and it is still never held whole. This
+// is the *content* check on input: an import is the single place where an
+// external digest (the layout's manifest names it) is the promise the content
+// is held to, so we re-derive the digest from the bytes and refuse a mismatch,
+// rather than trusting the name. A reader is asked exactly once; on success it
+// is at EOF and the caller closes it.
+//
+// get / export do not do this: they serve what is already stored (verified on
+// input) and leave content-vs-identity to the client, per the store's
+// "carry, don't re-check on output" contract.
+func VerifyReader(r io.Reader, d Digest) error {
+	got, err := godigest.FromReader(r)
+	if err != nil {
+		return err
+	}
+	if got != d {
+		return fmt.Errorf("content digest mismatch: %s does not hash to %s", got, d)
+	}
+	return nil
+}
+
+// Verify reports whether each reachable blob's content really hashes to the
+// digest the layout names for it: every manifest, and each manifest's config
+// and layers. It streams each blob and returns at the first mismatch. The
+// index itself is not a check target: its digest is computed from the index
+// bytes we hold (so it is self-consistent by construction, the same reason a
+// `blob add` key can never mismatch its content) and, in a dir layout, it lives
+// at index.json rather than under blobs/. reachable[0] is the index; the rest
+// are the externally-named blobs Verify covers — the same reachable[1:] copy
+// writes, so Verify mirrors it exactly.
+//
+// It is the pre-import consistency check that lets `oci import` trust a
+// layout: only here does an external digest name content we have not yet
+// derived it from. `Copy` then writes the same blobs; that second read is the
+// deliberate verify-then-write cost (no delete exists, so the bytes are checked
+// before they are committed rather than rolled back afterwards), and it is
+// cheap — SHA-2 256 is hardware-accelerated and, for a file/dir layout, the
+// read is cache-warm after this pass.
+func Verify(src Source, indexBytes []byte) error {
+	reachable, err := Reachable(src, indexBytes)
+	if err != nil {
+		return err
+	}
+	for _, d := range reachable[1:] {
+		r, _, err := src.Get(d)
+		if err != nil {
+			return err
+		}
+		verr := VerifyReader(r, d)
+		_ = r.Close()
+		if verr != nil {
+			return verr
+		}
+	}
+	return nil
+}

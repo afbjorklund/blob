@@ -98,9 +98,9 @@ type layoutSource interface {
 // artifactSource serves the four blobs a wrapped file becomes (index, manifest,
 // empty config, layer) so it can be imported exactly like a layout.
 type artifactSource struct {
-	a     *oci.Artifact
-	layer io.Reader
-	size  int64
+	a         *oci.Artifact
+	layerPath string
+	size      int64
 }
 
 func (s *artifactSource) Has(d oci.Digest) (bool, error) {
@@ -120,7 +120,14 @@ func (s *artifactSource) Get(d oci.Digest) (io.ReadCloser, int64, error) {
 	case s.a.ConfigDigest:
 		return io.NopCloser(bytes.NewReader(oci.EmptyConfig)), int64(len(oci.EmptyConfig)), nil
 	case s.a.LayerDigest:
-		return io.NopCloser(s.layer), s.size, nil
+		// The layer is the wrapped file; Source.Get must hand out a fresh
+		// reader on each call (import's Verify and Copy each read it once).
+		// Re-open per Get; the size is already known from the first pass.
+		f, err := os.Open(s.layerPath)
+		if err != nil {
+			return nil, 0, err
+		}
+		return f, s.size, nil
 	}
 	return nil, 0, fmt.Errorf("oci: unknown digest %s", d)
 }
@@ -376,11 +383,7 @@ func artifactWrap(arg string) (layoutSource, func(), oci.Digest, error) {
 	if err != nil {
 		return nil, nil, "", err
 	}
-	layer, err := openFile(arg)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	return &artifactSource{a: a, layer: layer, size: size}, func() { _ = layer.Close() }, layerDigest, nil
+	return &artifactSource{a: a, layerPath: arg, size: size}, func() {}, layerDigest, nil
 }
 
 // gzipMagic are the leading two bytes of every gzip stream (RFC 1952).
@@ -465,11 +468,6 @@ func ociDigestOf(path string) oci.Digest {
 	return d
 }
 
-// openFile returns an open handle to path (the caller must Close it), or an
-// error. It exists so the bare-file wrap path can stream the layer directly
-// from an open descriptor rather than re-opening it.
-func openFile(path string) (*os.File, error) { return os.Open(path) }
-
 // registerOCICmds wires the `oci` command group onto root.
 func registerOCICmds(root *cobra.Command) {
 	ociCmd := &cobra.Command{
@@ -534,6 +532,18 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 
 	indexBytes, err := src.IndexBytes()
 	if err != nil {
+		return err
+	}
+
+	// Verify before committing: every reachable blob's content must hash to the
+	// digest the layout names for it. This is the import's integrity gate — an
+	// OCI layout is an external assertion of "this content is this digest," and
+	// we re-derive the digest from the bytes rather than trust the name, so a
+	// tampered or corrupt layout is refused before a single blob (or name) is
+	// written. It streams each blob (O(1) memory; SHA-2 256 is fast), and `Copy`
+	// re-reads it once to write — the deliberate verify-then-write second pass,
+	// since the backends commit inside Put and no delete exists to roll back.
+	if err := oci.Verify(src, indexBytes); err != nil {
 		return err
 	}
 
