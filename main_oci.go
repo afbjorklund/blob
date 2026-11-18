@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -171,6 +172,142 @@ func artifactFor(k identity.Identity, size int64, head []byte) (*oci.Artifact, e
 	}
 	cfgMT, layerMT := oci.MediaTypesFor(head)
 	return oci.NewArtifact(d, size, layerMT, cfgMT)
+}
+
+// configImage reconstructs the canonical index + manifest of the image whose
+// config blob is at k (a Docker Image ID, `sha256:<hex>` straight from
+// `docker images`). It reads the config's rootfs (layer type + diff_ids),
+// looks up each diff_id's size in the store, and calls NewImage. It returns
+// oci.ErrNotImageConfig (wrapped) when k is not a recognizable image config,
+// so a caller can fall through to the artifact case with errors.Is; a missing
+// or zero-size layer is a distinct "blob not found" error, the documented
+// behavior for a compressed image whose stored layers are a different digest
+// from the diff_ids.
+func configImage(backend storage.StorageBackend, k identity.Identity) (*oci.Image, error) {
+	cfgD, err := identity.ToOCI(k)
+	if err != nil {
+		return nil, err
+	}
+	st, err := backend.Stat(k)
+	if err != nil {
+		return nil, err
+	}
+	cfgBytes, err := readBackendBlob(backend, k)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := oci.ParseConfig(bytes.NewReader(cfgBytes))
+	if err != nil {
+		return nil, err // wraps oci.ErrNotImageConfig when not a config
+	}
+	layerMT, err := oci.LayerMediaType(cfg.Rootfs.Type)
+	if err != nil {
+		return nil, err
+	}
+	layers := make([]oci.Descriptor, 0, len(cfg.Rootfs.DiffIDs))
+	for _, diffID := range cfg.Rootfs.DiffIDs {
+		id, err := identity.FromOCI(diffID)
+		if err != nil {
+			return nil, err
+		}
+		lst, err := backend.Stat(id)
+		if err != nil {
+			return nil, fmt.Errorf("%s: blob not found (compressed or absent)", diffID)
+		}
+		layers = append(layers, oci.Descriptor{MediaType: layerMT, Digest: diffID, Size: lst.Size})
+	}
+	// The config's media type is not inferred from its first byte: it is an
+	// image config by structure (we just parsed its rootfs), so the canonical
+	// application/vnd.oci.image.config.v1+json is what a manifest names.
+	return oci.NewImage(cfgD, st.Size, "", layers)
+}
+
+// imageSource serves the synthesized index + manifest of an *image* (not the
+// bare-file artifact) and streams its config and layers from the store. Used
+// by `oci ls` of an image config and by `oci export` of a config, mirroring
+// scaffoldSource for the single-layer artifact path.
+type imageSource struct {
+	img     *oci.Image
+	backend storage.StorageBackend
+}
+
+func (s imageSource) Has(d oci.Digest) (bool, error) {
+	if d == s.img.IndexDigest || d == s.img.ManifestDigest || d == s.img.Config.Digest {
+		return true, nil
+	}
+	for _, l := range s.img.Layers {
+		if d == l.Digest {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s imageSource) Get(d oci.Digest) (io.ReadCloser, int64, error) {
+	switch d {
+	case s.img.IndexDigest:
+		return io.NopCloser(bytes.NewReader(s.img.IndexBytes)), int64(len(s.img.IndexBytes)), nil
+	case s.img.ManifestDigest:
+		return io.NopCloser(bytes.NewReader(s.img.ManifestBytes)), int64(len(s.img.ManifestBytes)), nil
+	case s.img.Config.Digest:
+		id, err := identity.FromOCI(d)
+		if err != nil {
+			return nil, 0, err
+		}
+		r, st, err := s.backend.Get(id)
+		return r, st.Size, err
+	}
+	for _, l := range s.img.Layers {
+		if l.Digest == d {
+			id, err := identity.FromOCI(d)
+			if err != nil {
+				return nil, 0, err
+			}
+			r, st, err := s.backend.Get(id)
+			return r, st.Size, err
+		}
+	}
+	return nil, 0, fmt.Errorf("oci: unknown digest %s", d)
+}
+
+// readBackendBlob reads a stored blob fully into memory. Used only for small
+// JSON configs — a layer is GB-scale and is streamed, not buffered. The
+// caller's `Get`/`Peek`/`Stat` are the streaming / bounded paths; this is
+// the deliberate buffered exception for the two small JSON blobs the
+// config path needs (the config itself, and its synthesized manifest).
+func readBackendBlob(backend storage.StorageBackend, k identity.Identity) ([]byte, error) {
+	r, _, err := backend.Get(k)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(r)
+}
+
+// printManifest prints one manifest descriptor (indented) from src: fetch
+// the manifest, then its config descriptor and layer descriptors. `src` is
+// an oci.Source — either the store (index path) or the in-memory synthesis
+// (image-config path).
+func printManifest(d oci.Digest, src oci.Source) {
+	r, size, err := src.Get(d)
+	if err != nil {
+		fmt.Printf("  manifest %s: <unreadable: %v>\n", d, err)
+		return
+	}
+	defer r.Close()
+	mf, err := oci.ParseManifest(r)
+	if err != nil {
+		fmt.Printf("  manifest %s: <invalid: %v>\n", d, err)
+		return
+	}
+	fmt.Printf("  manifest %s (%s, %d B)\n", d, mf.MediaType, size)
+	if mf.Config.Digest != "" {
+		fmt.Printf("    config  %s (%s, %d B)\n",
+			mf.Config.Digest, mf.Config.MediaType, mf.Config.Size)
+	}
+	for i, l := range mf.Layers {
+		fmt.Printf("    layer[%d] %s (%s, %d B)\n", i, l.Digest, l.MediaType, l.Size)
+	}
 }
 
 // scaffoldSource serves the in-memory scaffold blobs of a single-blob OCI
@@ -754,6 +891,15 @@ func runOCIExport(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		src = storeSource{backend}
+	} else if img, cerr := configImage(backend, key); cerr == nil {
+		// An image config (Docker Image ID): synthesize the canonical index
+		// + manifest for its layers (the config case — `oci ls <config>`),
+		// and stream the real config / layers from the store. Nothing is
+		// written to the store by this path.
+		indexBytes = img.IndexBytes
+		src = imageSource{img: img, backend: backend}
+	} else if !errors.Is(cerr, oci.ErrNotImageConfig) {
+		return cerr
 	} else {
 		st, err := backend.Stat(key)
 		if err != nil {
@@ -861,11 +1007,33 @@ func runOCILs(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	} else {
-		// Not an image index in the store. Is it the layer of a persisted
-		// bare-file artifact (a `oci import <file>` of the same bytes)?
-		// Reconstruct the canonical scaffold and check the store for its
-		// index — that is the exact discriminator the import path leaves in
-		// the CAS.
+		// Not an image index. Is it an image config (a Docker Image ID,
+		// `sha256:<hex>` straight from `docker images`)? Its rootfs names the
+		// layers by diff_id, and for an uncompressed image those are the stored
+		// layer digests, so the index + manifest are re-derived from the config
+		// and its layers alone — no search of the store. (The digests printed
+		// are the *canonical* ones, which may differ from the author's
+		// annotated index/manifest the store holds; neither is persisted here.)
+		if img, err := configImage(backend, key); err == nil {
+			idx, ier := oci.ParseIndex(bytes.NewReader(img.IndexBytes))
+			if ier != nil {
+				return ier
+			}
+			fmt.Printf("index %s (%s, %d manifest(s))\n",
+				oci.DigestOf(img.IndexBytes), idx.MediaType, len(idx.Manifests))
+			for _, m := range idx.Manifests {
+				printManifest(m.Digest, imageSource{img: img, backend: backend})
+			}
+			return nil
+		} else if !errors.Is(err, oci.ErrNotImageConfig) {
+			return err
+		}
+
+		// Not an index and not a config: the bare-blob (artifact) case. Is it
+		// the layer of a persisted bare-file artifact (a `oci import <file>` of
+		// the same bytes)? Reconstruct the canonical scaffold and check the
+		// store for its index — that is the exact discriminator the import path
+		// leaves in the CAS.
 		st, err := backend.Stat(key)
 		if err != nil {
 			return err
@@ -904,32 +1072,11 @@ func runOCILs(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-
 	fmt.Printf("index %s (%s, %d manifest(s))\n",
 		oci.DigestOf(indexBytes), idx.MediaType, len(idx.Manifests))
-
 	src := storeSource{backend}
 	for _, m := range idx.Manifests {
-		r, _, err := src.Get(m.Digest)
-		if err != nil {
-			fmt.Printf("  manifest %s: <unreadable: %v>\n", m.Digest, err)
-			continue
-		}
-		defer r.Close()
-		mf, err := oci.ParseManifest(r)
-		if err != nil {
-			fmt.Printf("  manifest %s: <invalid: %v>\n", m.Digest, err)
-			continue
-		}
-		fmt.Printf("  manifest %s (%s, %d B)\n",
-			m.Digest, mf.MediaType, m.Size)
-		if mf.Config.Digest != "" {
-			fmt.Printf("    config  %s (%s, %d B)\n",
-				mf.Config.Digest, mf.Config.MediaType, mf.Config.Size)
-		}
-		for i, l := range mf.Layers {
-			fmt.Printf("    layer[%d] %s (%s, %d B)\n", i, l.Digest, l.MediaType, l.Size)
-		}
+		printManifest(m.Digest, src)
 	}
 	return nil
 }

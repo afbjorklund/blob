@@ -288,6 +288,10 @@ blob oci export myapp.sif -o out       # a bare file: wrapped as its artifact
 # List a stored layout's index, manifests, config and layers (read-only):
 blob oci ls busybox
 blob oci ls myapp.sif                  # a bare file's artifact (if `oci import`-ed)
+blob oci ls sha256:aaef90e0…b4aed     # an image config (Docker Image ID) —
+                                      # the rootfs's diff_ids name its layers;
+                                      # the tree is synthesized on demand (the
+                                      # digests are the canonical ones)
 ```
 
 `oci import` and `oci export` are the primary verbs; `oci add`/`oci get` work as
@@ -305,6 +309,19 @@ that file was `oci import`-ed, which persisted its scaffold), while
 `oci export` **writes the layout out** for any stored blob — so a `blob add`-ed
 file still exports to a valid artifact ([DESIGN.md](DESIGN.md) "OCI import /
 export").
+
+An image's **config** (the Docker Image ID, a `sha256:<hex>` straight from
+`docker images`) is also a valid `oci ls` argument: the command reads the
+config's `rootfs` (type + diff_ids), looks each diff_id up in the store for
+its size, synthesizes the canonical index + manifest, and prints the tree.
+The digests printed are the canonical ones (no annotations), which for a
+`docker save` import differ from the author's stored index/manifest — both
+are reachable by their respective digests, and the config + layers are the
+same real blobs either way. `oci export <config-digest>` writes that same
+canonical layout out (the config and layers byte-for-byte). Only the
+uncompressed case is supported (the one where `diff_ids` ARE the stored layer
+digests); a compressed image whose stored layers are a different digest
+fail with a "blob not found" error.
 
 Two behaviors follow. A *name* is any string the user chose — `add` and
 `oci import` also accept a foreign digest or reference (an `ipfs add` CID,

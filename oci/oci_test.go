@@ -3,6 +3,7 @@ package oci
 import (
 	"archive/tar"
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -302,6 +303,96 @@ func TestNewArtifact(t *testing.T) {
 	}
 	if m.Layers[0].Digest != ld {
 		t.Errorf("layer digest mismatch")
+	}
+}
+
+func TestNewImage(t *testing.T) {
+	cfg := []byte(`{"architecture":"amd64","os":"linux"}`)
+	cfgD := DigestOf(cfg)
+	layer := []byte("image-layer")
+	ld := DigestOf(layer)
+
+	img, err := NewImage(cfgD, int64(len(cfg)), MediaTypeImageConfig,
+		[]Descriptor{{MediaType: MediaTypeImageLayer, Digest: ld, Size: int64(len(layer))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Config.Digest != cfgD || img.Config.Size != int64(len(cfg)) {
+		t.Errorf("config descriptor = %+v, want digest %s size %d", img.Config, cfgD, len(cfg))
+	}
+	if img.ManifestDigest == DigestOf(img.IndexBytes) {
+		t.Error("manifest digest equals index digest; they must differ")
+	}
+	idx := mustParseIndex(t, img.IndexBytes)
+	if len(idx.Manifests) != 1 || idx.Manifests[0].Digest != img.ManifestDigest {
+		t.Errorf("index manifest = %+v, want digest %s", idx.Manifests, img.ManifestDigest)
+	}
+	m := mustParseManifest(t, img.ManifestBytes)
+	if len(m.Layers) != 1 || m.Layers[0].Digest != ld {
+		t.Errorf("manifest layers = %+v, want one layer %s", m.Layers, ld)
+	}
+}
+
+func TestNewImageDefaultsAndEmpty(t *testing.T) {
+	cfgD := DigestOf([]byte(`{}`))
+	// Empty media types and zero layers: manifest references only the config.
+	img, err := NewImage(cfgD, 2, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := mustParseManifest(t, img.ManifestBytes)
+	if m.Config.MediaType != MediaTypeImageConfig {
+		t.Errorf("config mediaType = %q, want %q", m.Config.MediaType, MediaTypeImageConfig)
+	}
+	if len(m.Layers) != 0 {
+		t.Errorf("manifest has %d layers, want 0", len(m.Layers))
+	}
+	// A non-positive config size is refused, before any JSON is built.
+	if _, err := NewImage(cfgD, 0, "", nil); err == nil {
+		t.Error("NewImage(size=0) err = nil, want an error")
+	}
+}
+
+func TestLayerMediaType(t *testing.T) {
+	for in, want := range map[string]string{
+		"":            MediaTypeImageLayer,
+		"layers":      MediaTypeImageLayer,
+		"layers.gzip": MediaTypeImageLayerGzip,
+	} {
+		got, err := LayerMediaType(in)
+		if err != nil {
+			t.Errorf("LayerMediaType(%q) err = %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("LayerMediaType(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if _, err := LayerMediaType("bogus"); err == nil {
+		t.Error("LayerMediaType(bogus) err = nil, want an error")
+	}
+}
+
+func TestParseConfig(t *testing.T) {
+	// A busybox-style config: rootfs with one diff_id is accepted.
+	good := `{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":["sha256:` + make64('6') + `"]}}`
+	c, err := ParseConfig(strings.NewReader(good))
+	if err != nil {
+		t.Fatalf("ParseConfig(good) = %v", err)
+	}
+	if c.Rootfs == nil || len(c.Rootfs.DiffIDs) != 1 {
+		t.Fatalf("rootfs = %+v, want one diff_id", c.Rootfs)
+	}
+
+	// Not JSON at all → ErrNotImageConfig (wrapped via errors.Is).
+	if _, err := ParseConfig(strings.NewReader("not json")); !errors.Is(err, ErrNotImageConfig) {
+		t.Errorf("ParseConfig(not json) err = %v; want it to wrap ErrNotImageConfig", err)
+	}
+	// JSON without a rootfs → ErrNotImageConfig (the fall-through
+	// discriminator a caller matches on).
+	noRootfs := `{"architecture":"amd64","os":"linux"}`
+	if _, err := ParseConfig(strings.NewReader(noRootfs)); !errors.Is(err, ErrNotImageConfig) {
+		t.Errorf("ParseConfig(no rootfs) err = %v; want it to wrap ErrNotImageConfig", err)
 	}
 }
 
