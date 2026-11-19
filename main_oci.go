@@ -30,6 +30,13 @@ var (
 	ociDigest   string
 	ociPlatform string
 	ociArch     string
+	// ociOriginal, set by --original, asks `oci import` of an *authored* OCI
+	// layout to also keep the author's index.json + manifest(s) (their
+	// annotations and therefore their digest are arbitrary, so they are a
+	// sha256-addressable "link" to the synthetic wrapper, not the CID the name
+	// points at). It is a no-op for a bare file or a legacy docker archive —
+	// neither carries author OCI JSON, so there is nothing extra to keep.
+	ociOriginal bool
 )
 
 // storeSink adapts a ReadWrite backend to an oci.Sink, translating each OCI
@@ -282,6 +289,118 @@ func readBackendBlob(backend storage.StorageBackend, k identity.Identity) ([]byt
 	}
 	defer r.Close()
 	return io.ReadAll(r)
+}
+
+// normalizeLayout rewrites a genuine authored layout (a dir, or a tar with
+// index.json) as its canonical (synthetic) form: the annotation-free
+// single-manifest index + manifest the store would synthesize for the image or
+// artifact, referencing the author's own config + layers (their digests are
+// content, untouched). It returns the synthetic source to import by default and
+// the author's own index.json + manifest bytes — kept verbatim for --original,
+// which additionally stores them as sha256-addressable "links" to the same
+// payload. A multi-manifest (multi-arch) layout is refused: this store carries
+// one image per import and records the other platforms as names only.
+func normalizeLayout(src layoutSource) (layoutSource, []byte, []byte, error) {
+	idxBytes, err := src.IndexBytes()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	idx, err := oci.ParseIndex(bytes.NewReader(idxBytes))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(idx.Manifests) != 1 {
+		return nil, nil, nil, fmt.Errorf("oci: authored layout has %d manifest(s); this store imports one per layout (multi-arch is out of scope)", len(idx.Manifests))
+	}
+
+	mreader, _, err := src.Get(idx.Manifests[0].Digest)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	mfBytes, err := io.ReadAll(mreader)
+	if cerr := mreader.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	mf, err := oci.ParseManifest(bytes.NewReader(mfBytes))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	nm, err := canonicalManifest(*mf)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	ni := oci.Index{
+		SchemaVersion: 2,
+		MediaType:     oci.MediaTypeImageIndex,
+		Manifests: []oci.Descriptor{{
+			MediaType: oci.MediaTypeImageManifest,
+			Digest:    oci.DigestOf(nm),
+			Size:      int64(len(nm)),
+		}},
+	}
+	niBytes, err := oci.Marshal(&ni)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return &normSource{base: src, ni: niBytes, nm: nm}, idxBytes, mfBytes, nil
+}
+
+// normSource is the canonical (synthetic) wrapper of an authored layout: the
+// rewrite index and manifest come from normalizeLayout, every other digest
+// (config, layers) is streamed straight from the underlying layout source. It
+// is what `oci import` copies to the store by default.
+type normSource struct {
+	base layoutSource
+	ni   []byte // rewrite index bytes
+	nm   []byte // rewrite manifest bytes
+}
+
+func (s *normSource) Has(d oci.Digest) (bool, error) {
+	if d == oci.DigestOf(s.ni) || d == oci.DigestOf(s.nm) {
+		return true, nil
+	}
+	return s.base.Has(d)
+}
+
+func (s *normSource) Get(d oci.Digest) (io.ReadCloser, int64, error) {
+	switch d {
+	case oci.DigestOf(s.ni):
+		return io.NopCloser(bytes.NewReader(s.ni)), int64(len(s.ni)), nil
+	case oci.DigestOf(s.nm):
+		return io.NopCloser(bytes.NewReader(s.nm)), int64(len(s.nm)), nil
+	}
+	return s.base.Get(d)
+}
+
+// IndexBytes returns the rewrite index.json (the synthetic default).
+func (s *normSource) IndexBytes() ([]byte, error) {
+	return s.ni, nil
+}
+
+// canonicalManifest rebuilds the canonical (annotation-free) manifest for the
+// config + layers that mf names, keeping their content-address digests, sizes,
+// and media types — the author's own content descriptors — and dropping only
+// the annotations (a user label, not content; the synthetic wrapper is the
+// "closest to the pure CAS" form, and an artifact's `{}` config has no
+// media type of its own to guess anyway). The result is a pure function of the
+// named content, exactly as NewImage/NewArtifact produce it.
+func canonicalManifest(mf oci.Manifest) ([]byte, error) {
+	layers := make([]oci.Descriptor, 0, len(mf.Layers))
+	for _, l := range mf.Layers {
+		layers = append(layers, oci.Descriptor{MediaType: l.MediaType, Digest: l.Digest, Size: l.Size})
+	}
+	m := oci.Manifest{
+		SchemaVersion: 2,
+		MediaType:     oci.MediaTypeImageManifest,
+		Config:        oci.Descriptor{MediaType: mf.Config.MediaType, Digest: mf.Config.Digest, Size: mf.Config.Size},
+		Layers:        layers,
+	}
+	return oci.Marshal(&m)
 }
 
 // printManifest prints one manifest descriptor (indented) from src: fetch
@@ -628,6 +747,7 @@ func registerOCICmds(root *cobra.Command) {
 	addCmd.Flags().StringVar(&ociDigest, "digest", "", "the base digest the image was pulled for (org.opencontainers.image.base.digest), a multi-arch origin digest (sha256:<hex> or a bare hex) that is the same for every arch of the image, so --platform/--arch is the component that disambiguates; when set, the import is additionally recorded under an oci/<variant>/<os>/<arch>/<algo>/<hex> name (the variant follows the input shape: a bare file is blob, a layout is json)")
 	addCmd.Flags().StringVar(&ociPlatform, "platform", "", "platform the --digest was pulled for (os/arch; e.g. linux/amd64); if unset, --arch (or the local arch) is implied under linux")
 	addCmd.Flags().StringVar(&ociArch, "arch", "", "arch the --digest was pulled for; a shortcut for --platform linux/<arch>; if unset, the local arch is implied under linux")
+	addCmd.Flags().BoolVar(&ociOriginal, "original", false, "for an OCI *layout* (dir or tar), also keep the author's index.json + manifest(s) verbatim — as sha256-addressable blobs pointing at the same config/layers the synthetic (default) wrapper refers to; the name still points at the synthetic index CID. A no-op for a bare file or a legacy docker archive (they carry no author OCI JSON), where the synthetic wrapper is the only form")
 
 	getCmd := &cobra.Command{
 		Use:     "export <cid|name|digest> -o <dir | tar>",
@@ -667,6 +787,23 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 		defer closer()
 	}
 
+	// A genuine authored layout (a dir, or a tar with index.json) carries the
+	// author's own index + manifest JSON. The default — the synthetic wrapper —
+	// rewrites those to the annotation-free canonical form so the name points
+	// at a CID that is a pure function of the content (the same rule the
+	// docker-archive and bare-file paths already follow). --original additionally
+	// keeps the author's own blobs. The bare-file and legacy-docker-archive
+	// paths are already synthetic, so no normalization applies.
+	var authorIdx, authorMf []byte
+	switch src.(type) {
+	case *oci.DirLayout, *oci.TarFileSource:
+		norm, ai, am, nerr := normalizeLayout(src)
+		if nerr != nil {
+			return nerr
+		}
+		src, authorIdx, authorMf = norm, ai, am
+	}
+
 	indexBytes, err := src.IndexBytes()
 	if err != nil {
 		return err
@@ -693,6 +830,31 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 	indexDigest, reachable, err := oci.Copy(src, storeSink{backend}, indexBytes)
 	if err != nil {
 		return err
+	}
+
+	// --original: additionally persist the author's own index + manifest JSON
+	// (kept verbatim by normalizeLayout) as sha256-addressable links to the
+	// same payload. They are not recorded as the name's target — the synthetic
+	// index (a CID that is a pure function of the content) remains the
+	// preferred handle. A bare file or a legacy docker archive carries no
+	// author OCI JSON (authorIdx is nil), so this is a no-op for them.
+	var extra int
+	if ociOriginal && authorIdx != nil {
+		for _, ob := range [][]byte{authorIdx, authorMf} {
+			if len(ob) == 0 {
+				continue
+			}
+			id, err := identity.FromOCI(oci.DigestOf(ob))
+			if err != nil {
+				return err
+			}
+			if have, herr := backend.Has(id); herr == nil && !have {
+				if perr := backend.Put(id, int64(len(ob)), bytes.NewReader(ob)); perr != nil {
+					return perr
+				}
+			}
+			extra++
+		}
 	}
 
 	indexKey, err := identity.FromOCI(indexDigest)
@@ -757,17 +919,22 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	orig := ""
+	if extra > 0 {
+		orig = fmt.Sprintf("; kept %d original(b) (author's index/manifest)", extra)
+	}
+
 	if len(skipped) > 0 {
-		fmt.Printf("Imported %d OCI blob(s); index %s; name %s; skipped %s (it is the blob's own handle)\n",
-			len(reachable), cidStr, strings.Join(records, ", "), strings.Join(skipped, ", "))
+		fmt.Printf("Imported %d OCI blob(s); index %s; name %s; skipped %s (it is the blob's own handle)%s\n",
+			len(reachable), cidStr, strings.Join(records, ", "), strings.Join(skipped, ", "), orig)
 		return nil
 	}
 	if len(records) == 1 {
-		fmt.Printf("Imported %d OCI blob(s); index %s; name %q\n", len(reachable), cidStr, records[0])
+		fmt.Printf("Imported %d OCI blob(s); index %s; name %q%s\n", len(reachable), cidStr, records[0], orig)
 		return nil
 	}
-	fmt.Printf("Imported %d OCI blob(s); index %s; names %s\n",
-		len(reachable), cidStr, strings.Join(records, ", "))
+	fmt.Printf("Imported %d OCI blob(s); index %s; names %s%s\n",
+		len(reachable), cidStr, strings.Join(records, ", "), orig)
 	return nil
 }
 

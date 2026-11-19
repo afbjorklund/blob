@@ -122,31 +122,45 @@ subsystem:
   in each direction — `FromOCI`/`ToOCI` — **not a re-hash**. So an OCI
   import and a plain `add` of identical bytes land on the *same* CAS
   key and deduplicate for free; there is no second store to point at.
-- **Layout = name → index → set of digests.** `oci add` treats the
-  layout's `index.json` as the name's blob (it is just another content
-  blob, stored like any other), then walks `index → manifest(s) →
-  config + layers`, storing the *reachable* set. Blobs that are in a
-  tar but referenced by nothing (e.g. the docker-archive half of a
-  v25+ "hybrid") are never walked and never stored — we read the OCI
-  half, ignore the docker half. A legacy-only docker archive (a tar
-  with `manifest.json` and no `index.json`) is upgraded in place: its
-  `manifest.json` names the same blobs by their own sha256 digest, so
-  a synthesized `index.json` + manifest references them directly and
-  the walk stores the config and layers under their own digests.
+- **Layout = name → index → set of digests.** `oci add` stores the
+  *reachable* set — `index → manifest(s) → config + layers` — and the
+  name points at a **synthetic** index: the annotation-free index +
+  manifest the store re-derives for the manifest's own config + layers.
+  That synthetic index's CID is a pure function of the content (the
+  digests are the content's), so the name is guessable and re-creatable,
+  the one handle that survives re-importing. The real config and real
+  layers are always stored under their own digests; the synthetic index
+  and manifest reference them by those very digests.
+- **The author's JSON is opt-in, not the default.** An authored OCI
+  layout (dir or tar with `index.json`) carries the author's own index
+  + manifest, which bear annotations — a user label, not content, and
+  therefore an unguessable digest. `--original` records those on top of
+  the synthetic default as *sha256-addressable links* to the same
+  config + layers: they are stored, retrievable by `blob cat` /
+  `oci export <their-digest>`, and pullable over `/v2/`, but they are
+  never the name's target and never the synthetic CID the name gives.
+  A bare file and a legacy docker archive (a tar with `manifest.json`,
+  no `index.json`) carry no author OCI JSON: both are upgraded in place
+  to the synthetic form (the archive's `manifest.json` names the same
+  blobs by their own sha256, so the synthesized index + manifest
+  reference them directly), and `--original` is a no-op for them.
   Only a file with *no* layout at all (no `index.json`, no
   `manifest.json`) is wrapped as a single-layer **artifact**: the
   canonical empty-config `{}` + one layer of the file's own bytes.
-- **The artifact is a pure function of the layer.** For a single
-  layer, the whole OCI scaffold (`index.json`, its manifest, the
-  `{}` config) is determined by content alone — the layer digest,
-  its size, and the SIF-vs-generic media types, all re-derived from
-  the bytes. We exploit this on the read/interop side: `oci export`
-  and the `/v2/` registry surface serve the scaffold **from memory**,
-  constructed on demand, and *never persist it* — so a `blob add`-ed
-  file and an `oci import`-ed copy are both exportable and pullable as
-  an OCI artifact, with no OCI JSON added to the CAS. `oci ls` keeps
-  the opposite policy (it *reports* the store): it lists an artifact
-  only when `oci import` actually persisted its scaffold.
+- **The synthetic wrapper is a pure function of the payload.** Whether
+  the input is the canonical artifact (a `{}` config + one layer, the
+  bare-file case) or the canonical image (a real image config + real
+  layers, the layout / docker-archive case), the resulting index +
+  manifest are determined by the named content alone — the config's
+  digest, size, and type, and each layer's digest, size, and type —
+  all the content the CAS already holds. That purity is why the name's
+  CID is guessable and re-creatable, and why `oci export` of a bare
+  file can reconstruct the scaffold from memory without looking it up
+  in the store (the `artifactFor` + `scaffoldSource` path), exactly as
+  `oci ls <config>` rebuilds the image tree from the config alone.
+  `oci ls` still reports what is in the store (it lists an artifact
+  only when the store actually holds that artifact's scaffold), while
+  `oci export` writes the layout out for either case.
 - **Streams, no materialization.** A layer may be GB/TB, so
   `oci add`/`oci get` stream blobs between the layout and the backend
   byte-for-byte; only `index.json` and manifests are small enough to

@@ -261,21 +261,47 @@ and no `index.json` — is upgraded to OCI format in place, preserving its layer
 or its gzip-compressed form (a `.tgz`/`.tar.gz`), which is decompressed
 transparently. A bare file is wrapped as a single-layer OCI artifact.
 
+The **import is synthetic by default**: every input shape yields a canonical
+(synthetic) `index.json` + manifest referencing the *real* config and *real*
+layers (or the `{}` config + single layer, for the artifact case). The name
+recorded points at that synthetic index's CID — a pure function of the content
+— so it is guessable and re-creatable. That is the closest to the pure CAS this
+store keeps. The real config and layers are always stored under their own
+digests, and the synthetic index + manifest reference them by those very digests.
+
+An **authored layout** (dir or tar with `index.json`) additionally carries the
+author's own `index.json` + manifest — with their annotations. Annotations are
+a user label, not content, and so the author's manifest has an *unguessable*
+digest. The **`--original`** flag records those author blobs on top of the
+synthetic default, as *sha256-addressable links* to the same config + layers
+(retrievable by `blob cat sha256:<author>`, exportable by their digest, and
+pullable over `/v2/`). They are never the name's target and never the
+synthetic CID the name gives; they are a provenance record. For a bare file
+or a legacy docker archive, `--original` is a no-op — neither carries any
+author OCI JSON, so there is nothing extra to keep.
+
 ```bash
-# Import an OCI layout (dir or tar) — stores the reachable blobs, names it:
+# Import an OCI layout (dir or tar) — stores the synthetic wrapper + the real
+# config and layers; names the synthetic index by default:
 blob oci import oci-save/busybox       # a directory layout
 blob oci import busybox.tar            # a docker/podman save tar (hybrid OK)
 blob oci import busybox.tgz            # gzip-compressed layout (decompressed)
 
+# Also keep the author's annotated index + manifest as sha256-addressable
+# links (their digest will NOT be the name's target; the name still points
+# at the synthetic index):
+blob oci import oci-save/busybox --original
+
 # Import a bare file as a single-layer OCI artifact (config = {}, one layer):
 # the name (basename + any --name) points at the file's bytes (same key as
 # `blob add`), and the printed CID is the OCI scaffold's address (its
-# index.json), which is what `oci ls` / `oci export` use:
+# index.json), which is what `oci ls` / `oci export` use. `--original` is a
+# no-op here: there is no author OCI JSON to keep.
 blob oci import myapp.sif
 
 # Give the imported layout a registry-style name (or several). The basename
 # (busybox) is always recorded too, and each --name is recorded alongside it;
-# all of them resolve to the same index CID:
+# all of them resolve to the same synthetic index CID:
 blob oci import docker.io/library/busybox.tar \
   --name 'docker.io/library/busybox' \
   --name 'docker.io/library/busybox@sha256:365a…'
