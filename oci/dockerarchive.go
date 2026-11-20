@@ -198,13 +198,14 @@ func entryBytes(src *TarFileSource, name string) ([]byte, error) {
 }
 
 // digestFromName recovers the sha256 digest hex encoded in a docker archive
-// entry name — a config ("sha256:<hex>") or a layer ("<hex>.tar[.gz]"). The
-// digest is a pure function of the name (and therefore of the blob's content),
-// so it needs no access to the blob itself: strip the layer suffix, then take
-// the hex after the final ":".
+// entry name — a config ("sha256:<hex>", a bare "<hex>", or "<hex>.json") or
+// a layer ("<hex>.tar[.gz]" / "<hex>.tgz"). The digest is a pure function of
+// the name (and therefore of the blob's content), so it needs no access to the
+// blob itself: strip the layer/config suffix, then take the hex after the
+// final ":" (a bare hex with no "algo:" prefix is accepted as-is).
 func digestFromName(name string) (hex string, ok bool) {
 	hex = name
-	for _, suf := range []string{".tar.gz", ".tgz", ".tar"} {
+	for _, suf := range []string{".tar.gz", ".tgz", ".tar", ".json"} {
 		if strings.HasSuffix(hex, suf) {
 			hex = hex[:len(hex)-len(suf)]
 			break
