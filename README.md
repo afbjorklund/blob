@@ -15,10 +15,15 @@ See [DESIGN.md](DESIGN.md) for the rationale behind the design choices.
 build it from the checkout, in the module directory:
 
 ```bash
+make            # build the `blob` binary (== go build)
+#  — or directly —
 go build      # builds the `blob` binary into the current directory
 go install    # installs it into GOBIN / ~/go/bin (on PATH, so just `blob`)
 blob --help
 ```
+
+(The `Makefile` also wraps the development gates — test, lint, e2e — see
+[IMPLEMENTATION.md](IMPLEMENTATION.md) (Development).)
 
 ## Features
 

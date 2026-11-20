@@ -286,12 +286,30 @@ The gates, cheapest first:
 
 1. `gofmt -w` (or `goimports -w`) the edited `.go` files
 2. `go build ./...`
-3. `go test ./...` (add `-race` for the storage concurrency guard)
+3. `go test ./...` (add `-race` for the storage concurrency guard — `make race`)
 4. `golangci-lint run` (govet + gocyclo; gofmt/goimports formatters; the
    final gate)
 5. `markdownlint-cli2 *.md` (doc changes)
 6. `shellcheck` the `*.sh`/`*.bash` (the e2e suite), per `.shellcheckrc`
    (`shell=bash`; SC1090/SC1091 disabled — sourcing shell scripts is the design)
+
+The `Makefile` is the one place all of the above live at once, in this order:
+
+| target                  | runs                                                            |
+|-------------------------|-----------------------------------------------------------------|
+| `make build`            | `go build ./...`                                                |
+| `make test`             | `go test ./...`                                                 |
+| `make race`             | `go test ./... -race` (the storage concurrency guard)           |
+| `make vet`              | `go vet ./...` (also inside `golangci-lint run`)                |
+| `make lint`             | `golangci-lint run`; `markdownlint-cli2 *.md`; `shellcheck`     |
+| `make end2end`          | builds the `blob` binary, then `cd e2e && ./run.sh`             |
+| `make gate`             | `build`, `test`, `lint`, `end2end` — all of the above, in order |
+| `make` / `make clean`   | builds / removes the `blob` binary                              |
+
+`make gate` is the whole gate in one command, and it *includes* the doc and
+shell lint — neither is optional. What `gate` does **not** cover, because they
+are opt-in (`make race` — step 3's `-race` flag — and the smoke tests below),
+stays as an explicit target / env-var step.
 
 ## Testing
 
