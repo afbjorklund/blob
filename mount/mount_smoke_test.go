@@ -93,8 +93,11 @@ func TestMountSmoke(t *testing.T) { //nolint:gocyclo
 
 	// Serve until the conn is torn down; run it in a goroutine so we can poll
 	// readiness from the test's main goroutine.
-	done := make(chan error, 1)
-	go func() { done <- fsys.Serve(conn) }()
+	done := make(chan struct{})
+	go func() {
+		_ = fsys.Serve(conn)
+		close(done)
+	}()
 
 	// Readiness: the first time `ls name/` lists both recorded names the
 	// kernel has completed INIT and a lookup round-trip (10s is generous for
