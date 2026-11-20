@@ -64,9 +64,8 @@ t007_oci_import_original() {
   oci_image_layout_real "$layout" "$WORK/layer1" "$WORK/layer2" || return 1
   [ -f "$WORK/config.json" ] || { echo "FAIL: builder produced no config.json" >&2; return 1; }
 
-  local cfghex cfgd l1hex l2hex authidx manauth
+  local cfghex l1hex l2hex authidx manauth
   cfghex="$(sha256sum "$WORK/config.json" | awk '{print $1}')"
-  cfgd="sha256:$cfghex"
   l1hex="$(sha256sum "$WORK/layer1" | awk '{print $1}')"
   l2hex="$(sha256sum "$WORK/layer2" | awk '{print $1}')"
   authidx="$(sha256sum "$layout/index.json" | awk '{print $1}')"
@@ -192,7 +191,7 @@ t007_oci_import_original() {
   blobhex="$(sha256sum "$WORK/blob" | awk '{print $1}')" || return 1
   expect_ok "oci import (bare file) with --original" \
     blob oci import "$WORK/blob" --original || return 1
-  local blobname="$WORK/blob" base
+  local base
   base="$(basename "$WORK/blob")"
   local blobcid
   blobcid="$(expect_ok "lookup bare name" blob lookup "$base")" || return 1
