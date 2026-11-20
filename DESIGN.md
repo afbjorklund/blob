@@ -122,23 +122,40 @@ subsystem:
   in each direction — `FromOCI`/`ToOCI` — **not a re-hash**. So an OCI
   import and a plain `add` of identical bytes land on the *same* CAS
   key and deduplicate for free; there is no second store to point at.
-- **Layout = name → index → set of digests.** `oci add` stores the
-  *reachable* set — `index → manifest(s) → config + layers` — and the
-  name points at a **synthetic** index: the annotation-free index +
-  manifest the store re-derives for the manifest's own config + layers.
-  That synthetic index's CID is a pure function of the content (the
-  digests are the content's), so the name is guessable and re-creatable,
-  the one handle that survives re-importing. The real config and real
-  layers are always stored under their own digests; the synthetic index
-  and manifest reference them by those very digests.
+- **Layout = name → content, with the index as the scaffolding CID.**
+  `oci add` stores the *reachable* set — `index → manifest(s) → config
+  + layers`. The name points at the content the layout describes, not at
+  the scaffolding:
+
+  - **a layout with a real image config** (one whose rootfs carries
+    `rootfs.diff_ids`): the name's CID is the **config blob's CID** — the
+    Docker Image ID, `sha256` straight from `docker images`. It is a pure
+    function of content: the config's own bytes, exactly the value `blob
+    add config.json` would record. The synthetic index + manifest that
+    `oci import` prints and the daemon's `X-Blob-Cid` advertises are
+    *derived* from that config (they are a pure function of it —
+    `oci.NewImage`), so they are still re-creatable, but the name targets
+    the stable content address rather than a checksum of a JSON document.
+  - **a bare file** (the artifact case): the name's CID is the file's own
+    bytes (the artifact's single layer), the same handle `blob add` uses,
+    so a name from `oci import f` and one from `blob add f` cannot clobber
+    each other and `blob get f` still returns the file.
+  - **a layout whose config is not a real image config** (a `{}` config,
+    a config without `rootfs.diff_ids`, a manifest with no config, or a
+    layer the store cannot resolve): the name falls back to the
+    synthetic index — the one handle that survives re-importing — so an
+    odd case never dangles the name on a plain JSON blob it is not a
+    real image config of.
 - **The author's JSON is opt-in, not the default.** An authored OCI
   layout (dir or tar with `index.json`) carries the author's own index
   + manifest, which bear annotations — a user label, not content, and
-  therefore an unguessable digest. `--original` records those on top of
+  therefore an unguessable digest.   `--original` records those on top of
   the synthetic default as *sha256-addressable links* to the same
   config + layers: they are stored, retrievable by `blob cat` /
   `oci export <their-digest>`, and pullable over `/v2/`, but they are
-  never the name's target and never the synthetic CID the name gives.
+  never the name's target (the name is the config, or the synthetic
+  index for a non-real image, above) — the author's JSON is reached
+  only by its digest.
   A bare file and a legacy docker archive (a tar with `manifest.json`,
   no `index.json`) carry no author OCI JSON: both are upgraded in place
   to the synthetic form (the archive's `manifest.json` names the same
@@ -238,12 +255,12 @@ shape**, in a name class of their own:
   classification: `variant` (what the leaf names), `os`/`arch`
   (the platform), `algo`/`hex` (the foreign digest). Only the leaf
   carries an identifier; the rest are classifications.
-- **Variant**: what the name points at. `blob` — a blob (raw file bytes: a
+- **Variant**: what the name names. `blob` — a blob (raw file bytes: a
   SIF, a tar, a layer, a config), the thing `apptainer --basepath` wants;
-  `json` — the OCI index / manifest (the layout `docker`/`podman save`
-  produces, or the single-layer scaffold `oras`/`apptainer push` produce).
-  An OCI image and an OCI artifact are the same JSON structure, so they
-  share the one `json` value. It is not a flag: it follows the input shape —
+  `json` — the content a layout describes (the image config for a real
+  image, the file's bytes for the single-layer artifact scaffold). An OCI
+  image and an OCI artifact are the same JSON structure, so they share the
+  one `json` value. It is not a flag: it follows the input shape —
   `oci import <bare-file>` is always `blob`, `oci import <layout>` is always
   `json`. This lets two co-exist under one `(os, arch, digest)` — the SIF
   and the OCI layout — each at its own path, each naming its own stored CID.

@@ -57,8 +57,10 @@ func TestServeSmoke(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = backend.Close() })
 
-	// Two layouts stored the same way `oci import` would — an image and an
-	// artifact, one name each — so both content kinds are served over the wire.
+	// Two layouts stored the same way `oci import` would — an image (whose name
+	// points at the image config, per the import policy for real image layouts)
+	// and a bare-file artifact (whose name points at the file's bytes) — one
+	// name each, so both content kinds are served over the wire.
 	layouts := []puller{
 		newImageLayout(t, backend, "image"),
 		newArtifactLayout(t, backend, "art"),
@@ -87,16 +89,24 @@ func TestServeSmoke(t *testing.T) {
 // scaffold on demand (matching `oci export`), so its by-name subtest
 // *does* run, and the root it serves is the same synthesized index bytes p.idx.
 type puller struct {
-	name        string
-	cid         string
-	idx         []byte
-	idxDigest   oci.Digest
+	name      string
+	cid       string // the layout root (index) CID — `oci import`'s printed CID
+	idx       []byte
+	idxDigest oci.Digest
+	// nameIsIndex is true when the name's CID equals p.cid; it is false
+	// when the name points at other content (the config for an image, the
+	// file's bytes for an artifact). Only used by the plain-HTTP 302 check.
 	nameIsIndex bool
 }
 
 // newImageLayout builds a minimal OCI image (index → manifest → config + layer)
-// and stores every reachable blob plus the name→index link, exactly as
-// `oci import` does for a layout with manifests.
+// and stores every reachable blob plus the name→config link, exactly as
+// `oci import` does for a layout whose manifest names a real image config (the
+// name's target is the config's CID — the Docker Image ID — and the synthetic
+// index + manifest are re-derived from it). The puller's root (idx, idxDigest,
+// cid) is the index: that is the layout root `oci import` prints and the /v2
+// surface serves, and imageRepo synthesizes the same canonical index bytes from
+// the stored config (a pure function), so the by-name and by-CID roots agree.
 func newImageLayout(t *testing.T, be storage.StorageBackend, name string) puller {
 	t.Helper()
 	l := buildTestLayout(t)
@@ -104,8 +114,11 @@ func newImageLayout(t *testing.T, be storage.StorageBackend, name string) puller
 	storeDigest(t, be, l.manifestDigest, l.manifestBytes)
 	storeDigest(t, be, l.configDigest, l.configBytes)
 	storeDigest(t, be, l.layerDigest, l.layerBytes)
-	storeName(t, be, name, l.indexDigest)
-	return puller{name: name, cid: outerCID(t, be, name), idx: l.indexBytes, idxDigest: l.indexDigest, nameIsIndex: true}
+	storeName(t, be, name, l.configDigest)
+	// The root CID for X-Blob-Cid / the by-CID repo is the index CID (what
+	// `oci import` prints). The name resolves to the config, so the plain-HTTP
+	// 302 (to the name's CID = the config) is not p.cid — nameIsIndex is false.
+	return puller{name: name, cid: outerCIDByIndex(t, be, l.indexDigest), idx: l.indexBytes, idxDigest: l.indexDigest, nameIsIndex: false}
 }
 
 // newArtifactLayout wraps a bare payload as a single-layer OCI artifact
@@ -152,27 +165,6 @@ func outerCIDByIndex(t *testing.T, be storage.StorageBackend, idxD oci.Digest) s
 		t.Fatal(err)
 	}
 	c := cid.Build(cid.CodecForFirstByte(b[0]), id)
-	s, err := cid.Render(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return s
-}
-
-// outerCID is a layout's outer (index-root) CID — what `blob oci import`
-// prints: the index key under the content codec (peeked, the daemon's own
-// name→CID rule), rendered base32hex.
-func outerCID(t *testing.T, be storage.StorageBackend, name string) string {
-	t.Helper()
-	key, err := be.Lookup(name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := be.Peek(key, 1)
-	if err != nil || len(first) == 0 {
-		t.Fatalf("Peek index first byte: %v (len %d)", err, len(first))
-	}
-	c := cid.Build(cid.CodecForFirstByte(first[0]), key)
 	s, err := cid.Render(c)
 	if err != nil {
 		t.Fatal(err)

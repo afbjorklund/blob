@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -145,7 +146,14 @@ func buildTestLayout(t *testing.T) *testLayout {
 	layer := []byte("tar-like layer payload")
 	layerDigest := oci.DigestOf(layer)
 
-	config := []byte(`{"architecture":"amd64","os":"linux"}`)
+	// A real image config: `rootfs.diff_ids` name the image's layer(s) by
+	// their uncompressed sha256. For the uncompressed layer in this fixture
+	// the diff_id IS the stored layer digest — the documented supported shape
+	// (a compressed layer would have a different stored blob, addressed by
+	// its compressed sha256, while the diff_id stays the uncompressed one —
+	// the follow-up the CLI already notes).
+	configStr := fmt.Sprintf(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":["%s"]}}`, layerDigest.String())
+	config := []byte(configStr)
 	configDigest := oci.DigestOf(config)
 
 	m := oci.Manifest{

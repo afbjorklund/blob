@@ -237,10 +237,14 @@ container ecosystem:
 - **OCI tag / name** ≈ `blob`'s **name index** (one name points at one
   entry, last-write-wins). The one deliberate difference is that a *real*
   OCI registry holds a mutable `index.json` (shared, mutable) while `blob`
-  records one *name → one index* link per name (each name is an atomic
+  records one *name → one entry* link per name (each name is an atomic
   single-key write, no read-modify-write of a shared document). Same idea,
   same direction (name → content → set of blobs), different scale of
-  mutation.
+  mutation. The entry a name points at is the *content the layout describes*
+  (the image config for a real image, the file's bytes for an artifact, the
+  synthetic index otherwise) — not the index itself — so that the name's CID
+  is a stable content address rather than a checksum of a derived JSON
+  document.
 - **Origin digest** ≈ `blob`'s name index *with* a classification. The
   digest of a multi-arch image is an identifier but names no content the
   store holds (it is the hash of an index we do not store, re-saved with

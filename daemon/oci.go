@@ -32,8 +32,14 @@ import (
 // that `blob oci import` prints, and its multihash *is* the store key of the
 // layout's index.json — so the OCI pull and the `blob://` gateway hit the very
 // same index blob. `name/<name>` is the secondary surface: it resolves <name>
-// through the name index (last-add-wins) and serves the same layout, just like
-// /name/<name> 302-redirects to /blob/<CID>.
+// through the name index (last-add-wins) and serves the same layout. For a
+// bare file that resolves to the file's bytes (artifact; the scaffold is
+// synthesized in memory); for a layout whose config names no real image it
+// resolves to the synthetic index (stored); for an image layout it resolves
+// to the *image config* — in which case the canonical index + manifest are
+// synthesized from the config + layers (stored), the same pure function of
+// content `oci import` re-created. So all three name targets serve an
+// equivalent OCI layout to the client.
 //
 // Read-only by design: the backend is opened storage.ReadOnly by the caller,
 // so the write paths do not exist by construction. The endpoints implemented
@@ -54,16 +60,22 @@ import (
 // same handful of backend calls `oci ls` makes (one Get of the index, then a
 // walk of its manifests). Two kinds of content produce a valid ociRepo today:
 //
-//   - a stored OCI index (dir/tar layout import) — the classic shape; and
-//   - a stored layer of a wrapped bare file (`oci import` or `blob add` of a
-//     non-layout file). For the latter no OCI JSON exists in the store; the
-//     canonical single-layer artifact (index bytes, manifest bytes, `{}` config
-//     bytes, layer key) is re-derived from the stored content with
-//     `oci.NewArtifact`, and the scaffold's small JSON blobs are served from
-//     memory — never persisted into the store, mirroring `oci export`'s
-//     "synthesized for the output only" contract. `ociArtifact` is nil for
-//     the index case and non-nil for the layer case; `indexBytes` holds the
-//     canonical bytes (which the scaffold case serves from memory).
+//   - a stored OCI index (dir/tar layout import) — the classic shape;
+//   - a stored image config blob (the Docker Image ID, the name target of a
+//     layout import) — the canonical index + manifest are re-derived from the
+//     config's rootfs + layers (`oci.NewImage`) and served from memory, while
+//     the config and layers stream straight from the store's blobs (they ARE
+//     the stored content); and
+//   - a stored layer of a wrapped bare file — the canonical single-layer
+//     artifact (`oci.NewArtifact`) is re-derived and its `{}`-config +
+//     manifest served from memory, the layer streamed from the store.
+//
+// For the two "scaffold" cases the synthesized index/manifest are not
+// persisted (they are a pure function of the stored content), mirroring
+// `oci export`'s "synthesize for the output only" contract. `ociImage` is
+// non-nil only for the config case, `ociArtifact` only for the layer case;
+// `indexBytes`/`indexDigest` always hold the canonical index, which the
+// scaffold cases serve from memory.
 type ociRepo struct {
 	repo        string
 	backend     storage.StorageBackend
@@ -71,6 +83,12 @@ type ociRepo struct {
 	indexBytes  []byte
 	indexDigest oci.Digest
 	reachable   map[oci.Digest]bool
+	// ociImage is non-nil for the stored image config case; it carries the
+	// canonical index + manifest so they can be served from memory and the
+	// set of reachable digests (config + layers) is in `reachable`. The
+	// config and layers always stream from the backend (they are the stored
+	// content).
+	ociImage *oci.Image
 	// ociArtifact is non-nil for the layer case (bare file wrapped as the
 	// canonical single-layer artifact); it carries the manifest and the
 	// `{}`-config so they can be served from memory, since neither is in the
@@ -190,6 +208,85 @@ func artifactRepo(repo string, backend storage.StorageBackend, key storage.Diges
 	}, nil
 }
 
+// imageRepo builds an ociRepo from a stored image config blob: the canonical
+// single-manifest index + manifest are synthesized in memory (a pure function
+// of the config and its reachable layers, exactly as `oci import` and
+// `oci export` build them — see main's configImage path), while the config
+// and layers stream straight from the backend (they are the stored content
+// the name resolves to). Mirrors the bare-file artifact case: the scaffold
+// is re-derived, not persisted. Returns an error (occurring only when the
+// blob is not a real image config — wraps oci.ErrNotImageConfig — or when
+// one of its layers is missing from the store) so the caller can fall through
+// to the artifact wrap.
+func imageRepo(repo string, backend storage.StorageBackend, key storage.Digest) (*ociRepo, error) {
+	st, err := backend.Stat(key)
+	if err != nil {
+		return nil, err
+	}
+	cfgBytes, err := readBlob(backend, key)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := oci.ParseConfig(bytes.NewReader(cfgBytes))
+	if err != nil {
+		return nil, err // wraps oci.ErrNotImageConfig when the blob is not a real image config
+	}
+	layerMT, err := oci.LayerMediaType(cfg.Rootfs.Type)
+	if err != nil {
+		return nil, err
+	}
+	layers := make([]oci.Descriptor, 0, len(cfg.Rootfs.DiffIDs))
+	for _, diffID := range cfg.Rootfs.DiffIDs {
+		id, err := identity.FromOCI(diffID)
+		if err != nil {
+			return nil, err
+		}
+		lst, err := backend.Stat(id)
+		if err != nil {
+			return nil, err
+		}
+		layers = append(layers, oci.Descriptor{MediaType: layerMT, Digest: diffID, Size: lst.Size})
+	}
+	cfgD, err := identity.ToOCI(key)
+	if err != nil {
+		return nil, err
+	}
+	img, err := oci.NewImage(cfgD, st.Size, "", layers)
+	if err != nil {
+		return nil, err
+	}
+	reachable := make(map[oci.Digest]bool, 4+len(img.Layers))
+	reachable[img.IndexDigest] = true
+	reachable[img.ManifestDigest] = true
+	reachable[img.Config.Digest] = true
+	for _, l := range img.Layers {
+		reachable[l.Digest] = true
+	}
+	return &ociRepo{
+		repo:        repo,
+		backend:     backend,
+		indexKey:    key,
+		indexBytes:  img.IndexBytes,
+		indexDigest: img.IndexDigest,
+		reachable:   reachable,
+		ociImage:    img,
+	}, nil
+}
+
+// readBlob reads a stored blob fully into memory. Used only for small JSON
+// (the config) — the daemon's streaming Get/Peek/Stat are the usual path,
+// and this is the deliberate bounded read for the one JSON blob the config
+// case needs (a layer is GB-scale and is streamed from the backend
+// throughout the serve path).
+func readBlob(backend storage.StorageBackend, k storage.Digest) ([]byte, error) {
+	r, _, err := backend.Get(k)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(r)
+}
+
 // newOCIRepo builds the per-repo resolver: resolve the repository to a store
 // key, then branch on the content.
 //
@@ -197,12 +294,18 @@ func artifactRepo(repo string, backend storage.StorageBackend, key storage.Diges
 // is '{' AND whose shape passes `oci.ParseIndex`) is the classic "stored
 // layout" case — indexRepo walks it.
 //
-// Any other key (a stored bare file, or a JSON blob that is not a valid
-// image index — for example a config JSON) is the "stored layer" case —
-// artifactRepo wraps it as the canonical single-layer artifact and serves
-// the scaffold from memory. This is the "any blob in the store is retrievable
-// over /v2" goal: `oci export` has the same policy (wrap the bare file in
-// the canonical artifact, don't 404).
+// A key that resolves to a real image config (the Docker Image ID, the
+// name target of a layout import) is the "stored image config" case —
+// imageRepo synthesizes the canonical index + manifest from the config +
+// its layers and streams config / layers from the backend.
+//
+// Any other key (a stored bare file, a {} config, a JSON blob that is not
+// a real image config, …) is the "stored layer" case — artifactRepo wraps
+// it as the canonical single-layer artifact and serves the scaffold from
+// memory. This is also the documented "odd case" fallback for the import
+// path: an import whose config is not a real image ({} config, no
+// rootfs.diff_ids, …) names the synthetic index, and resolving a different
+// name to the same config falls through to this wrap.
 func newOCIRepo(backend storage.StorageBackend, repo string) (*ociRepo, error) {
 	key, err := resolveIndexKey(backend, repo)
 	if err != nil {
@@ -227,9 +330,13 @@ func newOCIRepo(backend storage.StorageBackend, repo string) (*ociRepo, error) {
 		if _, perr := oci.ParseIndex(bytes.NewReader(indexBytes)); perr == nil {
 			return indexRepo(repo, backend, key, indexBytes)
 		}
-		// JSON blob that is not a valid image index: fall through and
-		// wrap it as its canonical single-layer artifact. Same wrap-or-404
-		// trade-off `oci export` makes for the same blob.
+		// Not a valid image index. Is it a real image config? (The name target
+		// of a layout import for a real image, or a config CID the user looked
+		// up with `blob lookup --oci`.)
+		if imgRepo, cerr := imageRepo(repo, backend, key); cerr == nil {
+			return imgRepo, nil
+		}
+		// not a real image config — fall through to the artifact wrap
 	}
 
 	return artifactRepo(repo, backend, key)
@@ -333,15 +440,25 @@ func ociPing(w http.ResponseWriter) {
 }
 
 // resolveBody returns the bytes for the digest d, drawing from the in-memory
-// scaffold (if this repo is a wrapped bare-file layer) or from the backend
-// (any other reachable blob). For a wrapped artifact, the manifest, index,
-// and `{}`-config are served from memory (they are not in the store); the
-// layer is always read from the store (it IS the stored blob). The
-// media-type for the manifest (so `serveV2Manifest` can set Content-Type)
-// is derived from the content — index bytes always carry the image-index
-// mediaType, manifest bytes always carry the manifest mediaType — in the
-// same way `oci export` writes them.
+// scaffold (if this repo is a wrapped bare-file layer or a stored image
+// config) or from the backend (any other reachable blob). The synthesized
+// index + manifest are served from memory when present (they are not in the
+// store); for a stored image the config and layers still stream from the
+// backend (they are stored content), and for a wrapped artifact the layer is
+// also in the store while the `{}`-config is in memory. The media-type for
+// a manifest (so `serveV2Manifest` can set Content-Type) is derived from the
+// content — index bytes always carry the image-index mediaType, manifest
+// bytes always carry the manifest mediaType — in the same way `oci export`
+// writes them.
 func (o *ociRepo) resolveBody(d oci.Digest) ([]byte, error) {
+	if img := o.ociImage; img != nil {
+		switch d {
+		case img.IndexDigest:
+			return img.IndexBytes, nil
+		case img.ManifestDigest:
+			return img.ManifestBytes, nil
+		}
+	}
 	if a := o.ociArtifact; a != nil {
 		switch d {
 		case a.IndexDigest:
@@ -451,12 +568,29 @@ func serveV2Blob(w http.ResponseWriter, r *http.Request, obj *ociRepo, ref strin
 		return
 	}
 
-	// Synthesized-scaffold case: serve the manifest and the `{}`-config from
-	// memory. They are small (KB-scale) and deterministic, so reading them
-	// whole and sending them as-is is fine and cheaper than a backend round
-	// trip. The heavy layer still streams from the store below.
-	if obj.ociArtifact != nil {
-		if d == obj.ociArtifact.ManifestDigest || d == obj.ociArtifact.ConfigDigest {
+	// Synthesized-scaffold cases: serve the small synthesized JSON from
+	// memory. For a stored image, the manifest is synthesized (the config
+	// and layers ARE stored). For a wrapped artifact, the manifest and the
+	// `{}`-config are synthesized (the layer IS stored). In both cases the
+	// heavy payload still streams from the store below.
+	if img := obj.ociImage; img != nil && d == img.ManifestDigest {
+		body, err := obj.resolveBody(d)
+		if err != nil {
+			ociError(w, http.StatusNotFound, "BLOB_UNKNOWN", d.String())
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Docker-Content-Digest", d.String())
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodHead {
+			return
+		}
+		_, _ = w.Write(body)
+		return
+	}
+	if a := obj.ociArtifact; a != nil {
+		if d == a.ManifestDigest || d == a.ConfigDigest {
 			body, err := obj.resolveBody(d)
 			if err != nil {
 				ociError(w, http.StatusNotFound, "BLOB_UNKNOWN", d.String())

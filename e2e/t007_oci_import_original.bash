@@ -95,17 +95,18 @@ t007_oci_import_original() {
   printf '%s\n' "$lsname" | grep -q "sha256:$manauth" \
     && { echo "FAIL: oci ls by name named the author's manifest ($manauth); want the synthetic" >&2; return 1; }
 
-  # (a2) The name's CID resolves to the *synthetic* index (not the author's).
-  # `blob cat <cid>` of that index must give the canonical index bytes
-  # (annotation-free), NOT the source layout's index.json.
-  local imgcid canonical
+  # (a2) The name's CID resolves to the image config (the Docker Image ID).
+  # `blob cat <cid>` must return the exact config bytes — and it must NOT
+  # carry the author's `io.containerd.image.name` annotation (which lives in
+  # the author's index, not in the config). This is the content-addressable
+  # target: it matches the `sha256` of the config's contents.
+  local imgcid cfgbytes
   imgcid="$(expect_ok "lookup img cid" blob lookup img)" || return 1
-  # The dir backend stores the synthetic index under its sha256 (with the
-  # multihash 12/20 prefix). We find it by content: run `blob cat "$imgcid"`
-  # and compare against the annotation-free index, NOT the author's index.json.
-  canonical="$(expect_ok "cat synthetic idx" blob cat "$imgcid")" || return 1
-  printf '%s' "$canonical" | grep -q 'io\.containerd\.image\.name' \
-    && { echo "FAIL: name CID's index bytes carry the author's annotation; want the synthetic (annotation-free)" >&2; return 1; }
+  cfgbytes="$(expect_ok "cat config by name" blob cat "$imgcid")" || return 1
+  [ "$cfgbytes" = "$(cat "$WORK/config.json")" ] \
+    || { echo "FAIL: name CID's bytes do not match the layout's config.json" >&2; return 1; }
+  printf '%s' "$cfgbytes" | grep -q 'io\.containerd\.image\.name' \
+    && { echo "FAIL: name CID's config bytes carry the author's annotation; want only the config" >&2; return 1; }
 
   # (a3) oci export by name: synthetic layout, no annotations.
   local out_a="$WORK/out_a"

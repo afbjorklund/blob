@@ -382,6 +382,43 @@ func (s *normSource) IndexBytes() ([]byte, error) {
 	return s.ni, nil
 }
 
+// imageConfigDigest returns the manifest's config digest and true when the
+// layout is a real image — its config blob parses as an image config
+// (rootfs.diff_ids) — and false otherwise. It reads the index's single
+// manifest and the manifest's config, so at most two small JSON blobs are
+// touched; a non-image layout ({}, a config without rootfs, a missing
+// manifest, …) simply reports false and the caller falls back to naming the
+// synthetic index. Called once on the import path, before the name is
+// recorded, so the layout's index is already in the store (or about to be).
+func imageConfigDigest(src layoutSource, indexBytes []byte) (oci.Digest, bool) {
+	idx, err := oci.ParseIndex(bytes.NewReader(indexBytes))
+	if err != nil || len(idx.Manifests) != 1 {
+		return "", false
+	}
+	mr, _, err := src.Get(idx.Manifests[0].Digest)
+	if err != nil {
+		return "", false
+	}
+	defer mr.Close()
+	mfBytes, err := io.ReadAll(mr)
+	if err != nil {
+		return "", false
+	}
+	mf, err := oci.ParseManifest(bytes.NewReader(mfBytes))
+	if err != nil || mf.Config.Digest == "" {
+		return "", false
+	}
+	cr, _, err := src.Get(mf.Config.Digest)
+	if err != nil {
+		return "", false
+	}
+	defer cr.Close()
+	if _, err := oci.ParseConfig(cr); err != nil {
+		return "", false // ErrNotImageConfig or I/O — not a real image
+	}
+	return mf.Config.Digest, true
+}
+
 // canonicalManifest rebuilds the canonical (annotation-free) manifest for the
 // config + layers that mf names, keeping their content-address digests, sizes,
 // and media types — the author's own content descriptors — and dropping only
@@ -743,11 +780,11 @@ func registerOCICmds(root *cobra.Command) {
 		Args:    cobra.ExactArgs(1),
 		RunE:    runOCIAdd,
 	}
-	addCmd.Flags().StringArrayVarP(&ociNames, "name", "", []string{}, "the base name the image was pulled as (org.opencontainers.image.base.name), an additional index name to record (repeatable); the basename of the argument is always recorded as well — for a layout pointing at its index, for a bare file pointing at the file's own bytes (the artifact's single layer, the same key `blob add` uses)")
+	addCmd.Flags().StringArrayVarP(&ociNames, "name", "", []string{}, "the base name the image was pulled as (org.opencontainers.image.base.name), an additional index name to record (repeatable); the basename of the argument is always recorded as well — for a layout pointing at the image config (the Docker Image ID; for a bare file: the file's own bytes, the same key `blob add` uses)")
 	addCmd.Flags().StringVar(&ociDigest, "digest", "", "the base digest the image was pulled for (org.opencontainers.image.base.digest), a multi-arch origin digest (sha256:<hex> or a bare hex) that is the same for every arch of the image, so --platform/--arch is the component that disambiguates; when set, the import is additionally recorded under an oci/<variant>/<os>/<arch>/<algo>/<hex> name (the variant follows the input shape: a bare file is blob, a layout is json)")
 	addCmd.Flags().StringVar(&ociPlatform, "platform", "", "platform the --digest was pulled for (os/arch; e.g. linux/amd64); if unset, --arch (or the local arch) is implied under linux")
 	addCmd.Flags().StringVar(&ociArch, "arch", "", "arch the --digest was pulled for; a shortcut for --platform linux/<arch>; if unset, the local arch is implied under linux")
-	addCmd.Flags().BoolVar(&ociOriginal, "original", false, "for an OCI *layout* (dir or tar), also keep the author's index.json + manifest(s) verbatim — as sha256-addressable blobs pointing at the same config/layers the synthetic (default) wrapper refers to; the name still points at the synthetic index CID. A no-op for a bare file or a legacy docker archive (they carry no author OCI JSON), where the synthetic wrapper is the only form")
+	addCmd.Flags().BoolVar(&ociOriginal, "original", false, "for an OCI *layout* (dir or tar), also keep the author's index.json + manifest(s) verbatim — as sha256-addressable blobs pointing at the same config/layers the synthetic (default) wrapper refers to. The name is not affected by this flag: it points at the image config (or at the synthetic index when the layout is not a real image). A no-op for a bare file or a legacy docker archive (they carry no author OCI JSON), where the synthetic wrapper is the only form")
 
 	getCmd := &cobra.Command{
 		Use:     "export <cid|name|digest> -o <dir | tar>",
@@ -863,24 +900,49 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// The layout's own CID: the index bytes under the content-based codec,
-	// rendered base32hex — the OCI scaffold's address, the object the daemon's
-	// /v2/ and /blob/ surfaces serve, and the handle for `oci export`/`ls`.
+	// rendered base32hex — the OCI scaffold's address. It is what `oci
+	// import` prints and the daemon's X-Blob-Cid / `blob oci ...` output
+	// advertises, but it is not the name's target: the name points at the
+	// content the OCI document describes (the config for an image, the file's
+	// bytes for an artifact) — the one handle with a stable `sha256` identity,
+	// not a checksum of a derived JSON document.
 	c := cid.Build(firstByteCodec(indexBytes), indexKey)
 	cidStr, err := cid.Render(c)
 	if err != nil {
 		return err
 	}
 
-	// Names record against the object given: the layout's index for a dir/tar,
-	// or the file's bytes (nameTarget) for a bare file, so `oci import f` and
-	// `blob add f` name the same key. A bare file takes its name straight from
-	// the basename — exactly what `blob add` uses — unlike a layout, whose
-	// `.tar`/`.tgz` suffix is stripped (`docker load` convention).
+	// Names record against the content the OCI document describes, not the
+	// document itself:
+	//
+	//   - a bare file (nameTarget set by openLayoutSource): the file's own
+	//     bytes — the artifact's single layer, the same key `blob add` uses,
+	//     so `oci import f` and `blob add f` name the same key and `blob get
+	//     f` keeps returning the file. Its base name is the basename, exactly
+	//     what `blob add` uses.
+	//   - a layout that names a real image config (rootfs.diff_ids present):
+	//     the config blob — the Docker Image ID, `sha256` straight from
+	//     `docker images`, a pure function of content the user can already
+	//     match to the config's sha256sum. It is not a checksum of a derived
+	//     JSON document: the synthetic index + manifest are a pure function of
+	//     the config (oci.NewImage), which `oci ls`/`oci export`/`/v2` rebuild
+	//     from the config (the configImage path and the daemon's image case).
+	//     A bare file takes its base name straight from the basename; a layout
+	//     strips its `.tar`/`.tgz` suffix (`docker load` convention).
+	//   - a layout whose config is not a real image config (a {} config, a
+	//     config whose layers we cannot resolve): defer to the synthetic index
+	//     — the one handle that survives re-importing — so the name never
+	//     dangles and the odd case degrades to the previous behaviour.
 	base := index.Default(args[0])
 	nameKey := indexKey
 	if nameTarget != "" {
 		base = filepath.Base(args[0])
 		nameKey, err = identity.FromOCI(nameTarget)
+		if err != nil {
+			return err
+		}
+	} else if cfgDigest, ok := imageConfigDigest(src, indexBytes); ok {
+		nameKey, err = identity.FromOCI(cfgDigest)
 		if err != nil {
 			return err
 		}

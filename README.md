@@ -263,33 +263,51 @@ transparently. A bare file is wrapped as a single-layer OCI artifact.
 
 The **import is synthetic by default**: every input shape yields a canonical
 (synthetic) `index.json` + manifest referencing the *real* config and *real*
-layers (or the `{}` config + single layer, for the artifact case). The name
-recorded points at that synthetic index's CID — a pure function of the content
-— so it is guessable and re-creatable. That is the closest to the pure CAS this
-store keeps. The real config and layers are always stored under their own
-digests, and the synthetic index + manifest reference them by those very digests.
+layers (or the `{}` config + single layer, for the artifact case). The
+synthetic index's CID is what `oci import` *prints* and the daemon's
+`X-Blob-Cid` header advertises — a pure function of the content, the closest
+to the pure CAS this store keeps — but the **name recorded points at the
+content the layout describes**, so that the user's own identity for the image
+is the stable handle, not a checksum of a derived JSON document:
+
+- a layout whose manifest names a **real image config** (`rootfs.diff_ids`
+  present) names the **config blob's CID** — the Docker Image ID, `sha256`
+  straight from `docker images`. It is the same key `blob add config.json`
+  records. `oci ls`/`oci export`/`/v2` rebuild the index + manifest from it
+  (a pure function — `oci.NewImage`).
+- a **bare file** names the **file's own bytes** (the artifact's single
+  layer), the same key `blob add` records, so a name from `oci import f` and
+  one from `blob add f` cannot clobber each other and `blob get f` returns the
+  file.
+- a layout whose config is *not* a real image config (a `{}` config, no
+  `rootfs.diff_ids`, …) falls back to naming the **synthetic index** — the
+  one handle that survives re-importing — so an odd case never dangles the
+  name on a plain JSON blob.
 
 An **authored layout** (dir or tar with `index.json`) additionally carries the
 author's own `index.json` + manifest — with their annotations. Annotations are
-a user label, not content, and so the author's manifest has an *unguessable*
-digest. The **`--original`** flag records those author blobs on top of the
+a user label, not content, and so the author's JSON blobs have *unguessable*
+digests. The **`--original`** flag records those author blobs on top of the
 synthetic default, as *sha256-addressable links* to the same config + layers
 (retrievable by `blob cat sha256:<author>`, exportable by their digest, and
-pullable over `/v2/`). They are never the name's target and never the
-synthetic CID the name gives; they are a provenance record. For a bare file
+pullable over `/v2/`). They are not the name's target — the name is the
+config (real image), the file's bytes (bare file), or the synthetic index
+(non-real image) per above — just a provenance record. For a bare file
 or a legacy docker archive, `--original` is a no-op — neither carries any
 author OCI JSON, so there is nothing extra to keep.
 
 ```bash
 # Import an OCI layout (dir or tar) — stores the synthetic wrapper + the real
-# config and layers; names the synthetic index by default:
+# config and layers; prints the synthetic index's CID. The name (basename +
+# any --name) points at the image config (Docker Image ID) when the layout
+# names a real image config, or at the synthetic index otherwise:
 blob oci import oci-save/busybox       # a directory layout
 blob oci import busybox.tar            # a docker/podman save tar (hybrid OK)
 blob oci import busybox.tgz            # gzip-compressed layout (decompressed)
 
 # Also keep the author's annotated index + manifest as sha256-addressable
-# links (their digest will NOT be the name's target; the name still points
-# at the synthetic index):
+# links (their digest is NOT the name's target; the name is the config, or
+# the synthetic index for a non-real image):
 blob oci import oci-save/busybox --original
 
 # Import a bare file as a single-layer OCI artifact (config = {}, one layer):
@@ -301,7 +319,8 @@ blob oci import myapp.sif
 
 # Give the imported layout a registry-style name (or several). The basename
 # (busybox) is always recorded too, and each --name is recorded alongside it;
-# all of them resolve to the same synthetic index CID:
+# all of them resolve to the same target CID (the image config for a real
+# image, the synthetic index otherwise):
 blob oci import docker.io/library/busybox.tar \
   --name 'docker.io/library/busybox' \
   --name 'docker.io/library/busybox@sha256:365a…'
