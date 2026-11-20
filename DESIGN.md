@@ -124,7 +124,7 @@ subsystem:
   key and deduplicate for free; there is no second store to point at.
 - **Layout = name → content, with the index as the scaffolding CID.**
   `oci add` stores the *reachable* set — `index → manifest(s) → config
-  + layers`. The name points at the content the layout describes, not at
+  \+ layers`. The name points at the content the layout describes, not at
   the scaffolding:
 
   - **a layout with a real image config** (one whose rootfs carries
@@ -148,7 +148,7 @@ subsystem:
     real image config of.
 - **The author's JSON is opt-in, not the default.** An authored OCI
   layout (dir or tar with `index.json`) carries the author's own index
-  + manifest, which bear annotations — a user label, not content, and
+  \+ manifest, which bear annotations — a user label, not content, and
   therefore an unguessable digest.   `--original` records those on top of
   the synthetic default as *sha256-addressable links* to the same
   config + layers: they are stored, retrievable by `blob cat` /
