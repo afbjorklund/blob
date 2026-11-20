@@ -3,7 +3,6 @@ package main
 import (
 	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +11,7 @@ import (
 	"strings"
 
 	"blob/cid"
+	"blob/compress"
 	"blob/identity"
 	"blob/index"
 	"blob/oci"
@@ -440,6 +440,266 @@ func canonicalManifest(mf oci.Manifest) ([]byte, error) {
 	return oci.Marshal(&m)
 }
 
+// ---------------------------------------------------------------------------
+// Real-image import: normalizeImage + imgSource
+//
+// An OCI layout whose config has rootfs.diff_ids is a *real image*. The
+// config addresses its layers by their *uncompressed* sha256 (the diff_ids),
+// in the same top→bottom order as the manifest's layers (the standard OCI
+// invariant, used directly by configImage and by docker/podman).
+//
+// A CAS keyed on the compressed blob's digest cannot satisfy the config's
+// diff_id — different content, different addressable object. The store's
+// canonical image shape (the same shape configImage / oci.NewImage / the
+// daemon's imageRepo build for reads) is:
+//   - the synthetic manifest names the diff_ids (uncompressed sha256)
+//   - the CAS holds the uncompressed bytes under those digests
+//
+// normalizeImage rewrites a real-image layout to that form:
+//   - each manifest layer is read from the layout (gzipped or plain)
+//   - if its content is not already the diff_id (i.e. it is gzipped), it is
+//     decompressed once into a temp file, hashed, and the diff_id is
+//     confirmed — the OCI invariant says the diff_id is rootfs.diff_ids[i],
+//     so the decompressed bytes must hash to it or the layout is inconsistent
+//   - the synthetic manifest names the diff_ids (in order); sizes and media
+//     type are recomputed to reflect the uncompressed .tar
+//   - the synthetic index names the synthetic manifest
+//
+// It returns the new layout source (imgSource), the author's index+manifest
+// bytes (kept verbatim for --original), the author's compressed layer
+// descriptors (so --original can store the compressed form verbatim and let
+// the author's manifest be pulled), a cleanup function that removes the
+// temp files, and ok=true. ok=false means the layout is not a real image and
+// the caller falls back to normalizeLayout.
+//
+// Non-image layouts ({} config, no diff_ids) take the fall-through path —
+// exactly the pre-existing behavior (the artifact case), where the layer's
+// own digest is the canonical address. blob add is untouched: a bare gzip
+// file still stores the compressed bytes under the compressed digest.
+
+// compressedOriginal names one of the author's compressed layers that
+// --original stores verbatim (under its compressed digest) so the author's
+// manifest also stays pullable from the /v2/ surface.
+type compressedOriginal struct {
+	digest oci.Digest
+	size   int64
+}
+
+// decompressedLayer holds where a decompressed layer's bytes live (a temp
+// file, for the imgSource to serve) and their uncompressed size.
+type decompressedLayer struct {
+	tempPath string
+	size     int64
+}
+
+// imgSource is the canonical import source for a real OCI image: the
+// synthetic index + manifest reference the config's diff_ids (uncompressed
+// digests); each decompressed layer is served from its temp file; the config
+// is served from the base layout.
+type imgSource struct {
+	base       layoutSource
+	ni, nm     []byte
+	decomp     map[oci.Digest]decompressedLayer // diff_id → temp file (compressed layers only)
+	compressed []compressedOriginal
+}
+
+func (s *imgSource) Has(d oci.Digest) (bool, error) {
+	if d == oci.DigestOf(s.ni) || d == oci.DigestOf(s.nm) {
+		return true, nil
+	}
+	if _, ok := s.decomp[d]; ok {
+		return true, nil
+	}
+	return s.base.Has(d)
+}
+
+func (s *imgSource) Get(d oci.Digest) (io.ReadCloser, int64, error) {
+	switch d {
+	case oci.DigestOf(s.ni):
+		return io.NopCloser(bytes.NewReader(s.ni)), int64(len(s.ni)), nil
+	case oci.DigestOf(s.nm):
+		return io.NopCloser(bytes.NewReader(s.nm)), int64(len(s.nm)), nil
+	}
+	if l, ok := s.decomp[d]; ok {
+		f, err := os.Open(l.tempPath)
+		if err != nil {
+			return nil, 0, err
+		}
+		return f, l.size, nil
+	}
+	return s.base.Get(d)
+}
+
+func (s *imgSource) IndexBytes() ([]byte, error) { return s.ni, nil }
+
+// normalizeImage rewrites a real-image layout into the canonical shape
+// described above. For a manifest layer that is already the diff_id (i.e.
+// uncompressed), no temp file is created — the layout still serves it. For
+// a compressed layer, the bytes are decompressed to a temp file whose
+// content must hash to the corresponding diff_id (OCI invariant), and it is
+// served from there. The synthetic manifest lists all diff_ids in order.
+//
+// Returns ok=false for a layout that is not a real image (no rootfs.diff_ids);
+// the caller falls back to normalizeLayout.
+func normalizeImage(src layoutSource) (layoutSource, []byte, []byte, []compressedOriginal, func(), bool, error) {
+	idxBytes, err := src.IndexBytes()
+	if err != nil {
+		return nil, nil, nil, nil, func() {}, false, err
+	}
+	idx, err := oci.ParseIndex(bytes.NewReader(idxBytes))
+	if err != nil || len(idx.Manifests) != 1 {
+		return nil, nil, nil, nil, func() {}, false, nil
+	}
+
+	mreader, _, err := src.Get(idx.Manifests[0].Digest)
+	if err != nil {
+		return nil, nil, nil, nil, func() {}, false, err
+	}
+	mfBytes, err := io.ReadAll(mreader)
+	_ = mreader.Close()
+	if err != nil {
+		return nil, nil, nil, nil, func() {}, false, err
+	}
+	mf, err := oci.ParseManifest(bytes.NewReader(mfBytes))
+	if err != nil {
+		return nil, nil, nil, nil, func() {}, false, err
+	}
+
+	creader, _, err := src.Get(mf.Config.Digest)
+	if err != nil {
+		return nil, nil, nil, nil, func() {}, false, err
+	}
+	cfgBytes, err := io.ReadAll(creader)
+	_ = creader.Close()
+	if err != nil {
+		return nil, nil, nil, nil, func() {}, false, err
+	}
+	cfg, err := oci.ParseConfig(bytes.NewReader(cfgBytes))
+	if err != nil {
+		return nil, nil, nil, nil, func() {}, false, nil // not a real image → fall back
+	}
+
+	if len(cfg.Rootfs.DiffIDs) != len(mf.Layers) {
+		// Inconsistent layout (layer count and diff_id count differ). Treat it
+		// as not a real image so the caller falls back to normalizeLayout,
+		// which copies the layout as-is.
+		return nil, nil, nil, nil, func() {}, false, nil
+	}
+
+	// Build the synthetic index + manifest; record each compressed layer and
+	// the decompressed file it became.
+	decomp := make(map[oci.Digest]decompressedLayer, len(mf.Layers))
+	var compressed []compressedOriginal
+	tmpPaths := make([]string, 0, len(mf.Layers))
+	cleanup := func() {
+		for _, p := range tmpPaths {
+			_ = os.Remove(p)
+		}
+	}
+	fail := func(e error) error {
+		cleanup()
+		return e
+	}
+
+	synLayers := make([]oci.Descriptor, len(mf.Layers))
+	for i, l := range mf.Layers {
+		diffID := cfg.Rootfs.DiffIDs[i]
+
+		if l.Digest == diffID {
+			// Already uncompressed (or at least its own digest is the
+			// diff_id). Served by the base layout — no temp file.
+			synLayers[i] = oci.Descriptor{MediaType: oci.MediaTypeImageLayer, Digest: diffID, Size: l.Size}
+			continue
+		}
+
+		// Gzip (or non-.tar form): decompress to a temp file, hash it, and
+		// require that it hash to the diff_id. This is the integrity check
+		// the store owes the config: the .tar we're about to store really
+		// is the layer the config refers to.
+		lr, lsize, err := src.Get(l.Digest)
+		if err != nil {
+			return nil, nil, nil, nil, func() {}, false, fail(err)
+		}
+		tmp, err := os.CreateTemp(os.TempDir(), "blob-oci-layer-*.tmp")
+		if err != nil {
+			_ = lr.Close()
+			return nil, nil, nil, nil, func() {}, false, fail(err)
+		}
+		writeSize, err := compress.Decompress(lr, tmp)
+		lrErr := lr.Close()
+		if err == nil {
+			err = lrErr
+		}
+		if err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			return nil, nil, nil, nil, func() {}, false, fail(err)
+		}
+		if err := tmp.Close(); err != nil {
+			_ = os.Remove(tmp.Name())
+			return nil, nil, nil, nil, func() {}, false, fail(err)
+		}
+
+		tf, err := os.Open(tmp.Name())
+		if err != nil {
+			_ = os.Remove(tmp.Name())
+			return nil, nil, nil, nil, func() {}, false, fail(err)
+		}
+		idHash, herr := identity.HashReader(tf)
+		_ = tf.Close()
+		if herr != nil {
+			_ = os.Remove(tmp.Name())
+			return nil, nil, nil, nil, func() {}, false, fail(herr)
+		}
+		got, terr := identity.ToOCI(idHash)
+		if terr != nil {
+			_ = os.Remove(tmp.Name())
+			return nil, nil, nil, nil, func() {}, false, fail(terr)
+		}
+		if got != diffID {
+			_ = os.Remove(tmp.Name())
+			return nil, nil, nil, nil, func() {}, false, fmt.Errorf(
+				"oci: layout is inconsistent — decompressed layer %s hashes to %s, but the config's diff_id is %s",
+				l.Digest, got, diffID,
+			)
+		}
+
+		decomp[diffID] = decompressedLayer{tempPath: tmp.Name(), size: writeSize}
+		tmpPaths = append(tmpPaths, tmp.Name())
+		compressed = append(compressed, compressedOriginal{digest: l.Digest, size: lsize})
+		synLayers[i] = oci.Descriptor{MediaType: oci.MediaTypeImageLayer, Digest: diffID, Size: writeSize}
+	}
+
+	synMf, err := canonicalManifest(oci.Manifest{
+		Config: oci.Descriptor{MediaType: oci.MediaTypeImageConfig, Digest: mf.Config.Digest, Size: mf.Config.Size},
+		Layers: synLayers,
+	})
+	if err != nil {
+		return nil, nil, nil, nil, func() {}, false, fail(err)
+	}
+	synIdx := oci.Index{
+		SchemaVersion: 2,
+		MediaType:     oci.MediaTypeImageIndex,
+		Manifests: []oci.Descriptor{{
+			MediaType: oci.MediaTypeImageManifest,
+			Digest:    oci.DigestOf(synMf),
+			Size:      int64(len(synMf)),
+		}},
+	}
+	synIdxBytes, err := oci.Marshal(&synIdx)
+	if err != nil {
+		return nil, nil, nil, nil, func() {}, false, fail(err)
+	}
+
+	return &imgSource{
+		base:       src,
+		ni:         synIdxBytes,
+		nm:         synMf,
+		decomp:     decomp,
+		compressed: compressed,
+	}, idxBytes, mfBytes, compressed, cleanup, true, nil
+}
+
 // printManifest prints one manifest descriptor (indented) from src: fetch
 // the manifest, then its config descriptor and layer descriptors. `src` is
 // an oci.Source — either the store (index path) or the in-memory synthesis
@@ -695,16 +955,12 @@ func isGzip(r *os.File) bool {
 // gunzipTo streams the gzip at src decompressed into dst (appending). src and
 // dst are not closed by this; the caller owns both and must Close dst (its
 // Sync is what commits the data, so close it after the read the caller needs).
+// Delegates to the compress package: src is already known to be gzip (the
+// caller checked isGzip), so compress.Decompress takes its gzip branch and the
+// "plain" fallback is unreachable — but it is the honest thing to use rather
+// than reaching into gzip.NewReader here directly.
 func gunzipTo(src *os.File, dst *os.File) error {
-	gz, err := gzip.NewReader(src)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(dst, gz); err != nil {
-		_ = gz.Close()
-		return err
-	}
-	if err := gz.Close(); err != nil {
+	if _, err := compress.Decompress(src, dst); err != nil {
 		return err
 	}
 	if err := dst.Sync(); err != nil {
@@ -784,7 +1040,7 @@ func registerOCICmds(root *cobra.Command) {
 	addCmd.Flags().StringVar(&ociDigest, "digest", "", "the base digest the image was pulled for (org.opencontainers.image.base.digest), a multi-arch origin digest (sha256:<hex> or a bare hex) that is the same for every arch of the image, so --platform/--arch is the component that disambiguates; when set, the import is additionally recorded under an oci/<variant>/<os>/<arch>/<algo>/<hex> name (the variant follows the input shape: a bare file is blob, a layout is json)")
 	addCmd.Flags().StringVar(&ociPlatform, "platform", "", "platform the --digest was pulled for (os/arch; e.g. linux/amd64); if unset, --arch (or the local arch) is implied under linux")
 	addCmd.Flags().StringVar(&ociArch, "arch", "", "arch the --digest was pulled for; a shortcut for --platform linux/<arch>; if unset, the local arch is implied under linux")
-	addCmd.Flags().BoolVar(&ociOriginal, "original", false, "for an OCI *layout* (dir or tar), also keep the author's index.json + manifest(s) verbatim — as sha256-addressable blobs pointing at the same config/layers the synthetic (default) wrapper refers to. The name is not affected by this flag: it points at the image config (or at the synthetic index when the layout is not a real image). A no-op for a bare file or a legacy docker archive (they carry no author OCI JSON), where the synthetic wrapper is the only form")
+	addCmd.Flags().BoolVar(&ociOriginal, "original", false, "for an OCI *layout* (dir or tar), also keep the author's index.json + manifest(s) verbatim — as sha256-addressable blobs pointing at the same config/layers the synthetic (default) wrapper refers to. For a real image, the author's *compressed* layer blobs are additionally persisted (the default import decompresses them into the canonical .tar form under the config's diff_ids; --original keeps the compressed form alongside so the author's manifest is also pullable). The name is not affected by this flag: it points at the image config (or at the synthetic index when the layout is not a real image). A no-op for a bare file or a legacy docker archive (they carry no author OCI JSON), where the synthetic wrapper is the only form")
 
 	getCmd := &cobra.Command{
 		Use:     "export <cid|name|digest> -o <dir | tar>",
@@ -828,18 +1084,52 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 	// author's own index + manifest JSON. The default — the synthetic wrapper —
 	// rewrites those to the annotation-free canonical form so the name points
 	// at a CID that is a pure function of the content (the same rule the
-	// docker-archive and bare-file paths already follow). --original additionally
-	// keeps the author's own blobs. The bare-file and legacy-docker-archive
-	// paths are already synthetic, so no normalization applies.
+	// docker-archive and bare-file paths already follow). --original
+	// additionally keeps the author's own blobs. The bare-file and
+	// legacy-docker-archive paths are already synthetic, so no normalization
+	// applies.
+	//
+	// For a real OCI image (a config with rootfs.diff_ids) the canonical form
+	// names the config's diff_ids and stores the *uncompressed* layer bytes
+	// under those digests. normalizeImage performs that rewrite: each
+	// compressed manifest layer is decompressed to a temp file (whose content
+	// must hash to the corresponding diff_id) and served from there. The
+	// author's index, manifest, and compressed layer blobs are kept verbatim
+	// and additionally stored under --original, so the author's own manifest
+	// also remains pullable. For a non-image layout ({} config, no
+	// diff_ids), normalizeImage returns ok=false and we fall back to
+	// normalizeLayout, which stores the layers as-is (the pre-existing
+	// behavior).
 	var authorIdx, authorMf []byte
+	var authorLayers []compressedOriginal
+	cleanup := func() {}
 	switch src.(type) {
-	case *oci.DirLayout, *oci.TarFileSource:
-		norm, ai, am, nerr := normalizeLayout(src)
-		if nerr != nil {
+	case *oci.DirLayout, *oci.TarFileSource, *oci.LegacyArchive:
+		// A genuine authored layout (a dir, a tar with index.json, or a
+		// legacy docker archive upgraded to OCI) carries an index + manifest
+		// the store can use. First check whether it is a *real image* (a
+		// config with rootfs.diff_ids): if so, rewrite it in the store's
+		// canonical form — the synthetic index + manifest name the config's
+		// diff_ids and each compressed manifest layer is decompressed into the
+		// canonical .tar under its diff_id (verify-then-write). The author's
+		// index/manifest and compressed layers are kept verbatim (and
+		// persisted under --original) so the author's manifest also stays
+		// pullable.
+		//
+		// If it is not a real image (a {} config, no diff_ids), fall back to
+		// normalizeLayout — the pre-existing path that keeps the layer's own
+		// digest as the canonical address (the artifact / generic case).
+		if norm, ai, am, al, cl, ok, nerr := normalizeImage(src); nerr != nil {
 			return nerr
+		} else if ok {
+			src, authorIdx, authorMf, authorLayers, cleanup = norm, ai, am, al, cl
+		} else if norm, ai, am, nerr := normalizeLayout(src); nerr != nil {
+			return nerr
+		} else {
+			src, authorIdx, authorMf = norm, ai, am
 		}
-		src, authorIdx, authorMf = norm, ai, am
 	}
+	defer cleanup()
 
 	indexBytes, err := src.IndexBytes()
 	if err != nil {
@@ -870,28 +1160,18 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// --original: additionally persist the author's own index + manifest JSON
-	// (kept verbatim by normalizeLayout) as sha256-addressable links to the
-	// same payload. They are not recorded as the name's target — the synthetic
-	// index (a CID that is a pure function of the content) remains the
-	// preferred handle. A bare file or a legacy docker archive carries no
-	// author OCI JSON (authorIdx is nil), so this is a no-op for them.
-	var extra int
-	if ociOriginal && authorIdx != nil {
-		for _, ob := range [][]byte{authorIdx, authorMf} {
-			if len(ob) == 0 {
-				continue
-			}
-			id, err := identity.FromOCI(oci.DigestOf(ob))
-			if err != nil {
-				return err
-			}
-			if have, herr := backend.Has(id); herr == nil && !have {
-				if perr := backend.Put(id, int64(len(ob)), bytes.NewReader(ob)); perr != nil {
-					return perr
-				}
-			}
-			extra++
-		}
+	// (kept verbatim) as sha256-addressable links to the same payload. They are
+	// not recorded as the name's target — the synthetic index (a CID that is a
+	// pure function of the content) remains the preferred handle. Under --original
+	// we also persist the author's *compressed* layer blobs verbatim so the
+	// author's manifest (which names them) is also pullable from /v2/ and
+	// `oci export`; in the default path the compressed bytes are not stored at
+	// all (the uncompressed form is the canonical one). A bare file or a legacy
+	// docker archive carries no author OCI JSON (authorIdx is nil), so this is
+	// a no-op for them.
+	extra, err := storeOriginals(ociOriginal, authorIdx, authorMf, authorLayers, src, backend)
+	if err != nil {
+		return err
 	}
 
 	indexKey, err := identity.FromOCI(indexDigest)
@@ -912,40 +1192,9 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Names record against the content the OCI document describes, not the
-	// document itself:
-	//
-	//   - a bare file (nameTarget set by openLayoutSource): the file's own
-	//     bytes — the artifact's single layer, the same key `blob add` uses,
-	//     so `oci import f` and `blob add f` name the same key and `blob get
-	//     f` keeps returning the file. Its base name is the basename, exactly
-	//     what `blob add` uses.
-	//   - a layout that names a real image config (rootfs.diff_ids present):
-	//     the config blob — the Docker Image ID, `sha256` straight from
-	//     `docker images`, a pure function of content the user can already
-	//     match to the config's sha256sum. It is not a checksum of a derived
-	//     JSON document: the synthetic index + manifest are a pure function of
-	//     the config (oci.NewImage), which `oci ls`/`oci export`/`/v2` rebuild
-	//     from the config (the configImage path and the daemon's image case).
-	//     A bare file takes its base name straight from the basename; a layout
-	//     strips its `.tar`/`.tgz` suffix (`docker load` convention).
-	//   - a layout whose config is not a real image config (a {} config, a
-	//     config whose layers we cannot resolve): defer to the synthetic index
-	//     — the one handle that survives re-importing — so the name never
-	//     dangles and the odd case degrades to the previous behaviour.
-	base := index.Default(args[0])
-	nameKey := indexKey
-	if nameTarget != "" {
-		base = filepath.Base(args[0])
-		nameKey, err = identity.FromOCI(nameTarget)
-		if err != nil {
-			return err
-		}
-	} else if cfgDigest, ok := imageConfigDigest(src, indexBytes); ok {
-		nameKey, err = identity.FromOCI(cfgDigest)
-		if err != nil {
-			return err
-		}
+	base, nameKey, err := resolveNameTarget(args[0], nameTarget, indexKey, src, indexBytes)
+	if err != nil {
+		return err
 	}
 
 	// Optionally record the OCI origin reference name (oci/<variant>/<os>/
@@ -965,15 +1214,9 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 	if nameTarget != "" {
 		variant = index.OciVariantBlob
 	}
-	ref, refOK, refErr := ociRefName(variant)
-	if refErr != nil {
-		return refErr
-	}
-	var extras []string
-	if refOK {
-		extras = append(append([]string{}, ociNames...), ref)
-	} else {
-		extras = ociNames
+	extras, err := ociNameExtras(variant)
+	if err != nil {
+		return err
 	}
 
 	records, skipped, err := recordNames(base, extras, nameKey, backend)
@@ -998,6 +1241,121 @@ func runOCIAdd(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Imported %d OCI blob(s); index %s; names %s%s\n",
 		len(reachable), cidStr, strings.Join(records, ", "), orig)
 	return nil
+}
+
+// storeOriginals persists the author's own blobs under --original: the index
+// and manifest JSON verbatim, plus (for a real image) every compressed layer
+// blob verbatim, so the author's manifest — which names the compressed
+// digests — also stays pullable. It returns the count of blobs stored
+// (authorIdx/authorMf are always stored when --original is set and they are
+// non-empty; each compressed layer is stored when not already present). Each
+// blob is only written when its digest is not already in the store, so a
+// re-import of the same layout is idempotent and the count reflects the
+// author's own payload, not the synthetic one. A nil authorIdx (bare file or
+// non-image layout) makes this a no-op returning 0.
+func storeOriginals(enabled bool, authorIdx, authorMf []byte, authorLayers []compressedOriginal, src oci.Source, backend storage.StorageBackend) (int, error) {
+	if !enabled || authorIdx == nil {
+		return 0, nil
+	}
+	storeBytes := func(b []byte) error {
+		if len(b) == 0 {
+			return nil
+		}
+		id, err := identity.FromOCI(oci.DigestOf(b))
+		if err != nil {
+			return err
+		}
+		have, herr := backend.Has(id)
+		if herr != nil {
+			return herr
+		}
+		if have {
+			return nil
+		}
+		return backend.Put(id, int64(len(b)), bytes.NewReader(b))
+	}
+	extra := 0
+	for _, ob := range [][]byte{authorIdx, authorMf} {
+		if len(ob) == 0 {
+			continue
+		}
+		if err := storeBytes(ob); err != nil {
+			return extra, err
+		}
+		extra++
+	}
+	for _, l := range authorLayers {
+		id, err := identity.FromOCI(l.digest)
+		if err != nil {
+			return extra, err
+		}
+		have, herr := backend.Has(id)
+		if herr != nil {
+			return extra, herr
+		}
+		if !have {
+			r, _, err := src.Get(l.digest)
+			if err != nil {
+				return extra, err
+			}
+			err = backend.Put(id, l.size, r)
+			_ = r.Close()
+			if err != nil {
+				return extra, err
+			}
+		}
+		extra++
+	}
+	return extra, nil
+}
+
+// resolveNameTarget decides the key a name records against and the baseline
+// name for an import. The *name* always points at the object the user handed
+// us, never at the derived JSON scaffold:
+//
+//   - a bare file (nameTarget set by openLayoutSource): the file's own bytes
+//     — the artifact's single layer, the same key `blob add` uses, so `oci
+//     import f` and `blob add f` name the same key and `blob get f` keeps
+//     returning the file. The base name is the basename, exactly what `blob
+//     add` uses.
+//   - a layout that names a real image config (rootfs.diff_ids present): the
+//     config blob — the Docker Image ID, `sha256` straight from `docker
+//     images`, a pure function of content the user can already match to the
+//     config's sha256sum. The synthetic index + manifest are a pure function
+//     of the config (the configImage path and the daemon's image case rebuild
+//     from it), so the name never dangles.
+//   - a layout whose config is not a real image config (a {} config, a
+//     config whose layers we cannot resolve): defer to the synthetic index —
+//     the one handle that survives re-importing — so the name never dangles
+//     and the odd case degrades to the previous behaviour.
+func resolveNameTarget(arg string, nameTarget oci.Digest, indexKey identity.Identity, src layoutSource, indexBytes []byte) (base string, nameKey identity.Identity, err error) {
+	base = index.Default(arg)
+	if nameTarget != "" {
+		base = filepath.Base(arg)
+		nameKey, err = identity.FromOCI(nameTarget)
+		return base, nameKey, err
+	}
+	if cfgDigest, ok := imageConfigDigest(src, indexBytes); ok {
+		nameKey, err = identity.FromOCI(cfgDigest)
+		return base, nameKey, err
+	}
+	return base, indexKey, nil
+}
+
+// ociNameExtras returns the additional name(s) recorded for an import under
+// --digest: the OCI origin reference (oci/<variant>/<os>/<arch>/<algo>/<hex>)
+// alongside any user --name flag(s), or just the user --name flag(s) when no
+// origin digest was given. It is the single point where the origin flags and
+// the user flag combine into the record list.
+func ociNameExtras(variant string) ([]string, error) {
+	ref, refOK, err := ociRefName(variant)
+	if err != nil {
+		return nil, err
+	}
+	if !refOK {
+		return ociNames, nil
+	}
+	return append(append([]string{}, ociNames...), ref), nil
 }
 
 // recordNames records the index names for an import: the baseline `base`
