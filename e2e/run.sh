@@ -30,12 +30,33 @@ fi
 
 skips=0
 for s in "${scenarios[@]}"; do
+  # Buffer the scenario's combined stdout+stderr and surface it only when it
+  # matters: a PASS stays quiet (the expected chatter — incl. the Error: lines
+  # a refused import prints — never reaches the log); a SKIP may carry its
+  # reason; a FAIL dumps the full buffer before aborting, so a failing run's
+  # log still shows everything.
   rc=0
-  "$s" || rc=$?
+  out="$("$s" 2>&1)" || rc=$?
   case "$rc" in
-    0) echo "PASS  $s" ;;
-    77) echo "SKIP  $s"; skips=$((skips+1)) ;;
-    *) echo "FAIL  $s (exit $rc)"; exit 1 ;;
+    0)
+      echo "PASS  $s"
+      ;;
+    77)
+      if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+      fi
+      echo "SKIP  $s"
+      skips=$((skips+1))
+      ;;
+    *)
+      if [ -n "$out" ]; then
+        echo "---- $s output ----"
+        printf '%s\n' "$out"
+        echo "---- end output ----"
+      fi
+      echo "FAIL  $s (exit $rc)" >&2
+      exit 1
+      ;;
   esac
 done
 
